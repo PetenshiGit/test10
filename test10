@@ -80,8 +80,8 @@ input double RiskRewardRatio       = 2.0;
 int adxPeriod = 14;
 int adxThreshold = 25;
 int adxStrongThreshold = 40;
-int diMinUnknown = 10;
-int diThreshold = 5;
+int adxRangeThreshold = 18;
+int diThreshold = 12;
 int emaShortPeriod = 20;
 int emaLongPeriod  = 50;
 
@@ -425,38 +425,118 @@ public:
 
         m_value = adxArr[0];
 
-        if (diP[0] < diMinUnknown && diM[0] < diMinUnknown)
+        // ADX：4段階（18未満：レンジ、25～：弱トレンド、40～：強トレンド、その他：相場不明）
+        if (adxArr[0] < adxRangeThreshold)
         {
-            m_type = TREND_UNKNOWN; m_state = STATE_UNKNOWN; return(true);
+            m_type = TREND_RANGE;
         }
-
-        if (adxArr[0] < adxThreshold) m_type = TREND_RANGE;
-        else
+        else if (adxArr[0] >= adxStrongThreshold)
         {
-            if (diP[0] > diM[0])
+            bool diUp = (diP[0] > diM[0]);
+            bool emaUp = (emaS[0] > emaL[0]);
+            if (diUp == emaUp)
             {
-                if (adxArr[0] >= adxStrongThreshold) m_type = TREND_STRONG_UP;
-                else m_type = TREND_WEAK_UP;
+                if (diUp) m_type = TREND_STRONG_UP; else m_type = TREND_STRONG_DOWN;
             }
             else
             {
-                if (adxArr[0] >= adxStrongThreshold) m_type = TREND_STRONG_DOWN;
-                else m_type = TREND_WEAK_DOWN;
+                if (diUp) m_type = TREND_WEAK_UP; else m_type = TREND_WEAK_DOWN;
             }
         }
-
-        if (m_type == TREND_RANGE) m_state = RANGE_MAINTAIN;
+        else if (adxArr[0] >= adxThreshold)
+        {
+            double diDiff = MathAbs(diP[0] - diM[0]);
+            if (diDiff >= diThreshold)
+            {
+                if (diP[0] > diM[0]) m_type = TREND_WEAK_UP;
+                else m_type = TREND_WEAK_DOWN;
+            }
+            else
+            {
+                m_type = TREND_UNKNOWN;
+            }
+        }
         else
         {
-            if (adxArr[1] < adxArr[0]) m_state = TREND_ACCELERATE;
-            else if (adxArr[1] > adxArr[0]) m_state = TREND_DECELERATE;
-            else m_state = TREND_MAINTAIN;
+            m_type = TREND_UNKNOWN;
         }
+
+        // トレンド状態判定：直近3本ADX[2][1][0]の変化パターンで判定
+        m_state = JudgeTrendState(adxArr, diP, diM);
         return(true);
     }
     TrendType getType() const { return (m_type); }
     TrendState getState() const { return (m_state); }
     double getValue() const { return (m_value); }
+
+private:
+    // トレンド状態判定：[2]=2つ前、[1]=1つ前、[0]=最新足
+    TrendState JudgeTrendState(const double &adxArr[], const double &diP[], const double &diM[])
+    {
+        if (ArraySize(adxArr) < 3) return STATE_UNKNOWN;
+        
+        double adx0 = adxArr[0], adx1 = adxArr[1], adx2 = adxArr[2];
+        double dip0 = diP[0], dip1 = diP[1], dip2 = diP[2];
+        double dim0 = diM[0], dim1 = diM[1], dim2 = diM[2];
+        
+        bool adxAscending = (adx2 < adx1 && adx1 < adx0);  // [2]<[1]<[0]
+        bool adxDescending = (adx2 > adx1 && adx1 > adx0);  // [2]>[1]>[0]
+        
+        // 昇順・全てADX≧25：トレンド加速
+        if (adxAscending && adx2 >= adxThreshold && adx1 >= adxThreshold && adx0 >= adxThreshold)
+            return TREND_ACCELERATE;
+        
+        // 降順・全てADX≧25：トレンド減速
+        if (adxDescending && adx2 >= adxThreshold && adx1 >= adxThreshold && adx0 >= adxThreshold)
+            return TREND_DECELERATE;
+        
+        // 全てADX≧25・昇順/降順なし：トレンド維持
+        if (adx2 >= adxThreshold && adx1 >= adxThreshold && adx0 >= adxThreshold && !adxAscending && !adxDescending)
+            return TREND_MAINTAIN;
+        
+        // 全てADX<18：レンジ維持
+        if (adx2 < adxRangeThreshold && adx1 < adxRangeThreshold && adx0 < adxRangeThreshold)
+            return RANGE_MAINTAIN;
+        
+        // 昇順で[0]と[1]のいずれか/両方がADX≧25：レンジ⇒トレンド移行（DI確認）
+        if (adxAscending)
+        {
+            if ((adx0 >= adxThreshold && adx1 < adxThreshold && adx2 < adxThreshold) ||
+                (adx0 >= adxThreshold && adx1 >= adxThreshold && adx2 < adxThreshold))
+            {
+                if (CheckDIConfirmationForRangeToTrend(dip0, dip1, dip2, dim0, dim1, dim2))
+                    return RANGE_TO_TREND;
+            }
+        }
+        
+        // 降順で[0]と[1]のいずれか/両方がADX<18：トレンド⇒レンジ移行
+        if (adxDescending)
+        {
+            if ((adx0 < adxRangeThreshold && adx1 >= adxThreshold && adx2 >= adxThreshold) ||
+                (adx0 < adxRangeThreshold && adx1 < adxRangeThreshold && adx2 >= adxThreshold))
+                return TREND_TO_RANGE;
+        }
+        
+        return STATE_UNKNOWN;  // 条件に当てはまらない場合
+    }
+    
+    // DI確認ロジック：レンジ⇒トレンド移行時にDI+/-の上下関係入れ替わり≧2回は判定不能、1回以下かつDI差≥12で確定
+    bool CheckDIConfirmationForRangeToTrend(double dip0, double dip1, double dip2, 
+                                           double dim0, double dim1, double dim2)
+    {
+        int diOrder2 = (dip2 > dim2) ? 1 : -1;
+        int diOrder1 = (dip1 > dim1) ? 1 : -1;
+        int diOrder0 = (dip0 > dim0) ? 1 : -1;
+        
+        int switchCount = 0;
+        if (diOrder2 != diOrder1) switchCount++;
+        if (diOrder1 != diOrder0) switchCount++;
+        
+        if (switchCount >= 2)
+            return false;
+        
+        double diDiff = MathAbs(dip0 - dim0);
+        return (diDiff >= diThreshold);
 };
 
 class CTrend15
@@ -482,13 +562,6 @@ public:
         if (!TryCopyBufferWithRetries(rsiH, 0, 1, need, rsiArr)) fail_rsi = true;
         if (!TryCopyBufferWithRetries(macdH, 0, 2, need + 1, macdMain)) fail_macdMain = true;
         if (!TryCopyBufferWithRetries(macdH, 1, 2, need + 1, macdSig)) fail_macdSig = true;
-
-        // フォールバック: 別オフセットで再取得を試みる
-        if (fail_macdMain || fail_macdSig)
-        {
-            if (fail_macdMain) fail_macdMain = !TryCopyBufferWithRetries(macdH, 0, 1, need, macdMain);
-            if (fail_macdSig) fail_macdSig = !TryCopyBufferWithRetries(macdH, 1, 1, need, macdSig);
-        }
 
         // 取得失敗があれば処理せず抜ける（最新足の更新もしない）
         if (fail_rsi || fail_macdMain || fail_macdSig)
