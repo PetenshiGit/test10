@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "2.33"
+#property version   "2.45"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -13,10 +13,81 @@ CTrade trade;
 // ===================================================================
 // 定数（コンパイル時定数）
 // ===================================================================
-#define CACHE_BARS 3
-#define DIVERGENCE_PERIOD 100
-#define REQ_CAP 1024
-#define MAX_HISTORY 100
+#define CACHE_BARS 3           // 指標データのキャッシュバー数（3バー分）
+#define DIVERGENCE_PERIOD 100  // ダイバージェンス検出に使用するデータ期間（100バー）
+#define REQ_CAP 1024           // リクエスト時刻記録のバッファサイズ（1024件）
+#define MAX_HISTORY 100        // トレード履歴の最大記録数（100件）
+
+// ===================================================================
+// ユーザー入力
+// ===================================================================
+input long   MagicNumber           = 3625;  // トレードの識別番号
+input double BaseLot               = 1.0;   // 基本ロットサイズ
+input double MaxLot                = 2.0;   // 最大ロットサイズ
+input double RiskPercentEquity     = 1.0;   // リスク率（%）
+input int    Max_Positions_Range   = 1;     // レンジ相場での最大ポジション数
+input int    Max_Positions_Trend   = 10;    // トレンド相場での最大ポジション数
+input int    MaxAllowedSpread      = 25;    // 最大許容スプレッド（ポイント）
+input int    SL_Points             = 40;    // ストップロス幅（ポイント）
+input double RiskRewardRatio       = 2.0;   // リスク・リワード比率
+
+// ===================================================================
+// 内部パラメータ（input にはしない）
+// ===================================================================
+int adxPeriod = 14;                 // ADX周期
+int adxThreshold = 25;              // ADX弱トレンド判定閾値
+int adxStrongThreshold = 40;        // ADX強トレンド判定閾値
+int adxRangeThreshold = 18;         // ADXレンジ判定閾値
+int diThreshold = 12;               // DI+/-差の閾値
+int emaShortPeriod = 20;            // 短期EMA周期
+int emaLongPeriod  = 50;            // 長期EMA周期
+
+int rsiPeriod = 14;                 // RSI周期
+int rsiOverbought = 70;             // RSI買われすぎ閾値
+int rsiOversold = 30;               // RSI売られすぎ閾値
+int macdFast = 12, macdSlow = 26, macdSignal = 9;  // MACD周期（高速・低速・シグナル）
+
+int bbPeriod = 20;                  // ボリンジャーバンド周期
+int bbDeviation = 2;                // ボリンジャーバンド標準偏差
+
+int stochK = 5, stochD = 3, stochSlowing = 3;  // ストキャスティクス周期（K・D・スローイング）
+int stochOverbought = 80, stochOversold = 20;  // ストキャスティクス閾値（買われすぎ・売られすぎ）
+
+int atrPeriod = 14;                 // ATR周期
+double atrMultiplierSL = 1.5;       // ストップロス用ATR倍率
+double atrMultiplierTrail = 1.5;    // トレーリング用ATR倍率
+double atrStopLowFactor = 0.5;      // ATR下限ファクター
+
+double lot_range = 0.5;             // レンジ相場ロット倍率
+double lot_weak_trend = 1.0;        // 弱トレンドロット倍率
+double lot_strong_trend = 1.5;      // 強トレンドロット倍率
+int pyramid_additional_allowed = 1; // ピラミッディング追加ポジション許可数
+
+// ===================================================================
+// インジケータハンドル（OnInit で作成）
+// ===================================================================
+int h_adx = INVALID_HANDLE;     // ADXインジケータハンドル
+int h_emaS = INVALID_HANDLE;    // 短期EMAインジケータハンドル
+int h_emaL = INVALID_HANDLE;    // 長期EMAインジケータハンドル
+int h_rsi = INVALID_HANDLE;     // RSIインジケータハンドル
+int h_macd = INVALID_HANDLE;    // MACDインジケータハンドル
+int h_std = INVALID_HANDLE;     // 標準偏差インジケータハンドル
+int h_bb = INVALID_HANDLE;      // ボリンジャーバンドインジケータハンドル
+int h_stoch = INVALID_HANDLE;   // ストキャスティクスインジケータハンドル
+int h_atr = INVALID_HANDLE;     // ATRインジケータハンドル
+
+// ===================================================================
+// 1分足の指標値をグローバルで保持（要求）
+// index 0 = 最新確定バー（bar1）
+// ===================================================================
+double g_bbUpper[CACHE_BARS];       // ボリンジャーバンド上限値配列（1分足）
+double g_bbMiddle[CACHE_BARS];      // ボリンジャーバンド中値配列（1分足）
+double g_bbLower[CACHE_BARS];       // ボリンジャーバンド下限値配列（1分足）
+double g_stochK[CACHE_BARS];        // ストキャスティクスK線配列（1分足）
+double g_stochD[CACHE_BARS];        // ストキャスティクスD線配列（1分足）
+double g_atr[CACHE_BARS];           // ATR値配列（1分足）
+double g_superTrend[CACHE_BARS];    // スーパートレンド値配列（1分足）
+int    g_superTrendDir[CACHE_BARS]; // スーパートレンド方向配列（1分足）
 
 // ===================================================================
 // 列挙型（仕様コメントは日本語で保持）
@@ -35,13 +106,24 @@ enum TrendType
 //--- トレンドの状態（成長/減速等）
 enum TrendState
 {
-   TREND_ACCELERATE,    // トレンド加速
-   TREND_DECELERATE,    // トレンド減速
-   TREND_MAINTAIN,      // トレンド維持
-   RANGE_MAINTAIN,      // レンジ維持
-   RANGE_TO_TREND,      // レンジ⇒トレンド移行 （強弱問わず）
-   TREND_TO_RANGE,      // トレンド⇒レンジ移行
-   STATE_UNKNOWN        // 判定不能
+   TREND_ACCELERATE,       // トレンド加速
+   TREND_DECELERATE,       // トレンド減速
+   TREND_REACCELERATE,     // トレンド再加速
+   TREND_RECOVERY_MAINTAIN,// トレンド回復維持
+   TREND_STALL_MAINTAIN,   // トレンド失速維持
+   TREND_MAINTAIN,         // トレンド維持
+   RANGE_MAINTAIN,         // レンジ維持
+   RANGE_TO_TREND,         // レンジ⇒トレンド移行 （強弱問わず）
+   TREND_TO_RANGE,         // トレンド⇒レンジ移行
+   STATE_UNKNOWN           // 判定不能
+};
+
+//--- 相場過熱感判定enum
+enum OverheatType
+{
+   OVERHEAT_NONE,       // 過熱なし
+   OVERHEAT_OVERBOUGHT, // 買われすぎ（上昇過熱）
+   OVERHEAT_OVERSOLD    // 売られすぎ（下降過熱）
 };
 
 //--- ダイバージェンス判定用enum
@@ -53,94 +135,75 @@ enum DivergenceType
    DIVERGENCE_CONFLICT  // 強気・弱気両方同時発生
 };
 
-//--- 過熱感判定enum
-enum OverheatType
-{
-   OVERHEAT_NONE,       // 過熱なし
-   OVERHEAT_OVERBOUGHT, // 買われすぎ（上昇過熱）
-   OVERHEAT_OVERSOLD    // 売られすぎ（下降過熱）
-};
-
 // ===================================================================
-// ユーザー入力（必要最小限）
+// グローバル変数とオブジェクトの定義
 // ===================================================================
-input int    MagicNumber           = 3625;
-input double BaseLot               = 1.0;
-input double MaxLot                = 2.0;
-input double RiskPercentEquity     = 1.0;
-input int    Max_Positions_Range   = 1;
-input int    Max_Positions_Trend   = 10;
-input int    MaxAllowedSpread      = 25;     // ポイント
-input int    SL_Points             = 40;
-input double RiskRewardRatio       = 2.0;
+CTrend1H TrendH1;
+CTrend15 TrendM15;
+CTrend1M TrendM1;
 
-// ===================================================================
-// 内部パラメータ（input にはしない）
-// ===================================================================
-int adxPeriod = 14;
-int adxThreshold = 25;
-int adxStrongThreshold = 40;
-int adxRangeThreshold = 18;
-int diThreshold = 12;
-int emaShortPeriod = 20;
-int emaLongPeriod  = 50;
-
-int rsiPeriod = 14;
-int rsiOverbought = 70;
-int rsiOversold = 30;
-int macdFast = 12, macdSlow = 26, macdSignal = 9;
-
-int bbPeriod = 20;
-int bbDeviation = 2; // int に変更（警告回避）
-
-int stochK = 5, stochD = 3, stochSlowing = 3;
-int stochOverbought = 80, stochOversold = 20;
-
-int atrPeriod = 14;
-double atrMultiplierSL = 1.5;
-double atrMultiplierTrail = 1.5;
-double atrStopLowFactor = 0.5;
-
-double lot_range = 0.5;
-double lot_weak_trend = 1.0;
-double lot_strong_trend = 1.5;
-int pyramid_additional_allowed = 1;
-
-// ===================================================================
-// インジケータハンドル（OnInit で作成）
-// ===================================================================
-int h_adx = INVALID_HANDLE;
-int h_emaS = INVALID_HANDLE;
-int h_emaL = INVALID_HANDLE;
-int h_rsi = INVALID_HANDLE;
-int h_macd = INVALID_HANDLE;
-int h_bb = INVALID_HANDLE;
-int h_stoch = INVALID_HANDLE;
-int h_atr = INVALID_HANDLE;
-
-// ===================================================================
-// 1分足の指標値をグローバルで保持（要求）
-// index 0 = 最新確定バー（bar1）
-// ===================================================================
-double g_bbUpper[CACHE_BARS];
-double g_bbMiddle[CACHE_BARS];
-double g_bbLower[CACHE_BARS];
-double g_stochK[CACHE_BARS];
-double g_stochD[CACHE_BARS];
-double g_atr[CACHE_BARS];
-double g_superTrend[CACHE_BARS];
-int    g_superTrendDir[CACHE_BARS];
+datetime LastH1 = 0, LastM15 = 0, LastM1 = 0;
+int TotalPositions = 0, NowPositions = 0, BuyCount = 0, SellCount = 0;
 
 // ===================================================================
 // 判定結果をグローバル enum として保持（H1/M15）
 // ===================================================================
-TrendType      g_TrendTypeH = TREND_UNKNOWN;
-TrendState     g_TrendStateH = STATE_UNKNOWN;
-double         g_TrendValueH = 0.0;
-TrendState     g_TrendStateM15 = STATE_UNKNOWN;
-double         g_TrendValueM15 = 0.0;
-DivergenceType g_DivergenceM15 = DIVERGENCE_NONE;
-OverheatType   g_OverheatM15 = OVERHEAT_NONE;
+TrendType      g_TrendTypeH = TREND_UNKNOWN;      // H1トレンドの種別
+TrendState     g_TrendStateH = STATE_UNKNOWN;     // H1トレンドの状態
+double         g_TrendValueH = 0.0;               // H1トレンド値（ADXなど）
+OverheatType   g_OverheatM15 = OVERHEAT_NONE;     // M15過熱感判定結果
+DivergenceType g_DivergenceM15 = DIVERGENCE_NONE; // M15ダイバージェンス判定結果
+
+// OnTimer で決定される M15 シグナル適用時のロット倍率
+double g_M15LotMultiplier = 1.0;   // M15シグナル適用時のロット乗数
+
+// ===================================================================
+// 価格変数とフラグ変数の分離
+// ===================================================================
+// M1 で判定した決済価格を保持（OnTimer 設定、OnTick で比較）
+double g_closePriceBuy = 0.0;      // BUY ポジションを決済するための基準価格（ASK で比較）
+double g_closePriceSell = 0.0;     // SELL ポジションを決済するための基準価格（BID で比較）
+// M1 で判定したエントリー価格（OnTimer 設定、OnTick で比較）
+double g_entryPriceBuy = 0.0;      // BUY エントリ基準価格（ASK で比較）
+double g_entryPriceSell = 0.0;     // SELL エントリ基準価格（BID で比較）
+
+// 実行可否フラグ：価格が存在すること ≠ 実行してよいこと
+bool g_canEntryBuy = false;        // BUY エントリー実行可フラグ（初期OFF）
+bool g_canEntrySell = false;       // SELL エントリー実行可フラグ（初期OFF）
+bool g_canCloseBuy = false;        // BUY 決済実行可フラグ（初期OFF）
+bool g_canCloseSell = false;       // SELL 決済実行可フラグ（初期OFF）
+
+// エントリー判定フラグ：ブレイク後リトレース用
+bool g_entryThresholdCrossedBuy = false;   // BUY エントリー閾値超えフラグ（初期OFF）
+bool g_entryThresholdCrossedSell = false;  // SELL エントリー閾値超えフラグ（初期OFF）
+
+// 決済判定フラグ：ブレイク後リトレース用
+bool g_closeThresholdCrossedBuy = false;   // BUY 決済閾値超えフラグ（初期OFF）
+bool g_closeThresholdCrossedSell = false;  // SELL 決済閾値超えフラグ（初期OFF）
+
+// ===================================================================
+// 指標取得リトライ管理フラグ
+// 各足内で、取得失敗した指標があったか否かを記録
+// ===================================================================
+// 指標取得管理フラグ（true=直近取得成功→再取得不要、false=取得未成功→次回/リトライを試行）
+bool g_h1AllOk = false;      // H1 の指標が直近で全て取得成功しているか
+bool g_m15AllOk = false;     // M15 の指標が直近で全て取得成功しているか
+bool g_m1AllOk = false;      // M1 の指標が直近で全て取得成功しているか
+
+// --- 各指標ごとの取得成功フラグと直近成功時の値キャッシュ ---
+// H1 指標（配列は series 形式で保存）
+bool g_h1_adx_ok = false, g_h1_dip_ok = false, g_h1_dim_ok = false, g_h1_emaS_ok = false, g_h1_emaL_ok = false;
+double g_h1_adxArr[3], g_h1_dipArr[3], g_h1_dimArr[3], g_h1_emaSArr[3], g_h1_emaLArr[3];
+
+// M15 指標
+bool g_m15_rsi_ok = false, g_m15_macd_ok = false;
+double g_m15_rsiArr[3];
+double g_m15_macdMainAll[DIVERGENCE_PERIOD];
+double g_m15_macdSigAll[DIVERGENCE_PERIOD];
+
+// M1 指標
+bool g_m1_bb_ok = false, g_m1_std_ok = false, g_m1_stoch_ok = false, g_m1_atr_ok = false;
+double g_m1_midArr[CACHE_BARS], g_m1_stdArr[CACHE_BARS], g_m1_kArr[CACHE_BARS], g_m1_dArr[CACHE_BARS], g_m1_atrArr[CACHE_BARS];
 
 // ===================================================================
 // M15 のシグナル管理構造体（ダイバージェンス・MACDクロス）
@@ -150,68 +213,93 @@ OverheatType   g_OverheatM15 = OVERHEAT_NONE;
 // ===================================================================
 struct SM15Signal
 {
-   datetime barTime;
-   bool hasDiv;
-   DivergenceType divType;
-   bool hasMACDCross;
-   int macdCrossDir; // 1=ゴールデンクロス, -1=デッドクロス
-   bool pendingNextM1;
-   bool usedForEntry;
-   bool usedForClose;
+   datetime barTime;               // シグナル発生時刻
+   bool hasDiv;                    // ダイバージェンス発生フラグ
+   DivergenceType divType;         // ダイバージェンスの種別
+   bool hasMACDCross;              // MACDクロスフラグ
+   int macdCrossDir;               // MACDクロス方向（1=ゴールデンクロス、-1=デッドクロス）
+   bool pendingNextM1;             // 次のM1足で有効フラグ
+   bool usedForEntry;              // エントリーに使用済みフラグ
+   bool usedForClose;              // 決済に使用済みフラグ
 };
-SM15Signal g_M15Signal;
+SM15Signal g_M15Signal;             // M15シグナル管理構造体
 
 // ===================================================================
 // リクエスト制限／履歴
 // ===================================================================
-ulong ReqTimes[REQ_CAP];
-int ReqCount = 0;
-datetime TradeHistory[MAX_HISTORY];
-int TradeHistorySize = 0;
-ulong StartTimeGlobal = 0;
+ulong ReqTimes[REQ_CAP];            // リクエスト時刻配列
+int ReqCount = 0;                   // リクエストカウント
+datetime TradeHistory[MAX_HISTORY]; // トレード履歴配列
+int TradeHistorySize = 0;           // トレード履歴サイズ
+ulong StartTimeGlobal = 0;          // EA開始時刻（グローバル）
 
-ulong NowMs() { return (GetTickCount64()); }
+ulong NowMs()
+{
+   return (GetTickCount64());
+}
 void PushReq(ulong t)
 {
-    if (ReqCount < REQ_CAP) ReqTimes[ReqCount++] = t;
-    else { for (int i = 1; i < ReqCount; i++) ReqTimes[i - 1] = ReqTimes[i]; ReqTimes[ReqCount - 1] = t; }
+   if (ReqCount < REQ_CAP)
+      ReqTimes[ReqCount++] = t;
+   else
+   {
+      for (int i = 1; i < ReqCount; i++)
+         ReqTimes[i - 1] = ReqTimes[i];
+      ReqTimes[ReqCount - 1] = t;
+   }
 }
 int CountReqSince(ulong window_ms)
 {
-    if (ReqCount == 0) return 0;
-    ulong now = NowMs();
-    int cnt = 0;
-    for (int i = ReqCount - 1; i >= 0; i--)
-    {
-        if (now - ReqTimes[i] <= window_ms) cnt++;
-        else break;
-    }
-    return (cnt);
+   if (ReqCount == 0)
+      return 0;
+   ulong now = NowMs();
+   int cnt = 0;
+   for (int i = ReqCount - 1; i >= 0; i--)
+   {
+      if (now - ReqTimes[i] <= window_ms)
+         cnt++;
+      else
+         break;
+   }
+   return (cnt);
 }
 bool CanReq(bool urgent = false)
 {
-    int window = RequestWindowMS();
-    if (urgent) window = MathMax(200, RequestWindowMS() / 2);
-    return (CountReqSince(window) < RequestLimitCount());
+   int window = RequestWindowMS();
+   if (urgent)
+      window = MathMax(200, RequestWindowMS() / 2);
+   return (CountReqSince(window) < RequestLimitCount());
 }
-void RegReq() { PushReq(NowMs()); }
+void RegReq()
+{
+   PushReq(NowMs());
+}
 
-int RequestLimitCount() { return 20; }
-int RequestWindowMS() { return 2000; }
+int RequestLimitCount()
+{
+   return 20;
+}
+
+int RequestWindowMS()
+{
+   return 2000;
+}
 
 void AddTradeHistoryTimestamp(datetime t)
 {
-    if (TradeHistorySize < MAX_HISTORY)
-    {
-        for (int i = TradeHistorySize; i > 0; i--) TradeHistory[i] = TradeHistory[i - 1];
-        TradeHistory[0] = t;
-        TradeHistorySize++;
-    }
-    else
-    {
-        for (int i = MAX_HISTORY - 1; i > 0; i--) TradeHistory[i] = TradeHistory[i - 1];
-        TradeHistory[0] = t;
-    }
+   if (TradeHistorySize < MAX_HISTORY)
+   {
+      for (int i = TradeHistorySize; i > 0; i--)
+         TradeHistory[i] = TradeHistory[i - 1];
+      TradeHistory[0] = t;
+      TradeHistorySize++;
+   }
+   else
+   {
+      for (int i = MAX_HISTORY - 1; i > 0; i--)
+         TradeHistory[i] = TradeHistory[i - 1];
+      TradeHistory[0] = t;
+   }
 }
 
 // ===================================================================
@@ -219,326 +307,307 @@ void AddTradeHistoryTimestamp(datetime t)
 // ===================================================================
 void FindPeaks(const double &arr[], int period, bool mode, int minDistance, int peakCount, int &outIdx[])
 {
-    ArrayInitialize(outIdx, -1);
-    int found = 0;
-    int lastIdx = -minDistance - 1;
-    for (int i = 0; i < period && found < peakCount; i++)
-    {
-        bool isPeak = true;
-        for (int j = -1; j <= 1; j++)
-        {
-            int k = i + j;
-            if (k < 0 || k >= period) continue;
-            if ((mode && arr[i] < arr[k]) || (!mode && arr[i] > arr[k]))
-            {
-                isPeak = false;
-                break;
-            }
-        }
-        if (isPeak && (i - lastIdx) >= minDistance)
-        {
-            outIdx[found] = i;
-            lastIdx = i;
-            found++;
-        }
-    }
+   ArrayInitialize(outIdx, -1);
+   int found = 0;
+   int lastIdx = -minDistance - 1;
+   for (int i = 0; i < period && found < peakCount; i++)
+   {
+      bool isPeak = true;
+      for (int j = -1; j <= 1; j++)
+      {
+         int k = i + j;
+         if (k < 0 || k >= period)
+            continue;
+         if ((mode && arr[i] < arr[k]) || (!mode && arr[i] > arr[k]))
+         {
+            isPeak = false;
+            break;
+         }
+      }
+      if (isPeak && (i - lastIdx) >= minDistance)
+      {
+         outIdx[found] = i;
+         lastIdx = i;
+         found++;
+      }
+   }
 }
 
 int FindIndicatorPeak(double &indi[], int center, int period, bool mode, int win, bool &used[])
 {
-    int start = MathMax(0, center - win);
-    int end = MathMin(period - 1, center + win);
-    int idx = -1;
-    double val = mode ? -DBL_MAX : DBL_MAX;
-    for (int i = start; i <= end; i++)
-    {
-        if (used[i]) continue;
-        if ((mode && indi[i] > val) || (!mode && indi[i] < val))
-        {
-            val = indi[i];
-            idx = i;
-        }
-    }
-    if (idx >= 0) used[idx] = true;
-    return (idx);
+   int start = MathMax(0, center - win);
+   int end = MathMin(period - 1, center + win);
+   int idx = -1;
+   double val = mode ? -DBL_MAX : DBL_MAX;
+   for (int i = start; i <= end; i++)
+   {
+      if (used[i])
+         continue;
+      if ((mode && indi[i] > val) || (!mode && indi[i] < val))
+      {
+         val = indi[i];
+         idx = i;
+      }
+   }
+   if (idx >= 0)
+      used[idx] = true;
+   return (idx);
 }
 
 DivergenceType CheckDivergenceFull(string symbol, ENUM_TIMEFRAMES timeframe, double &indicator[], int period, int peakCount = 3, int minDistance = 2, int win = 2)
 {
-    double highs[], lows[];
-    if (CopyHigh(symbol, timeframe, 0, period, highs) <= 0 ||
-        CopyLow(symbol, timeframe, 0, period, lows) <= 0)
-    {
-        Print("ダイバージェンス判定用の価格データ取得に失敗しました。");
-        return (DIVERGENCE_NONE);
-    }
-    ArraySetAsSeries(highs, true);
-    ArraySetAsSeries(lows, true);
-
-    int high_idx[10];
-    int low_idx[10];
-    FindPeaks(highs, period, true, minDistance, peakCount, high_idx);
-    FindPeaks(lows, period, false, minDistance, peakCount, low_idx);
-
-    bool usedIndi[200];
-    ArrayInitialize(usedIndi, false);
-    int indiHigh[10];
-    int indiLow[10];
-    for (int i = 0; i < peakCount; i++)
-    {
-        indiHigh[i] = high_idx[i] >= 0 ? FindIndicatorPeak(indicator, high_idx[i], period, true, win, usedIndi) : -1;
-        indiLow[i] = low_idx[i] >= 0 ? FindIndicatorPeak(indicator, low_idx[i], period, false, win, usedIndi) : -1;
-    }
-
-    bool bearish = false;
-    bool bullish = false;
-    if (high_idx[0] >= 0 && high_idx[1] >= 0 && high_idx[2] >= 0 && indiHigh[0] >= 0 && indiHigh[1] >= 0 && indiHigh[2] >= 0)
-    {
-        if (highs[high_idx[0]] < highs[high_idx[1]] && highs[high_idx[1]] < highs[high_idx[2]] &&
-            indicator[indiHigh[0]] > indicator[indiHigh[1]] && indicator[indiHigh[1]] > indicator[indiHigh[2]])
-            bearish = true;
-    }
-    if (low_idx[0] >= 0 && low_idx[1] >= 0 && low_idx[2] >= 0 && indiLow[0] >= 0 && indiLow[1] >= 0 && indiLow[2] >= 0)
-    {
-        if (lows[low_idx[0]] > lows[low_idx[1]] && lows[low_idx[1]] > lows[low_idx[2]] &&
-            indicator[indiLow[0]] < indicator[indiLow[1]] && indicator[indiLow[1]] < indicator[indiLow[2]])
-            bullish = true;
-    }
-    if (bearish && bullish) return (DIVERGENCE_CONFLICT);
-    if (bearish) return (DIVERGENCE_BEARISH);
-    if (bullish) return (DIVERGENCE_BULLISH);
-    return (DIVERGENCE_NONE);
-}
-
-// ===================================================================
-// ヘルパー: CopyBuffer を最大 3 回リトライし、成功なら true を返す
-// ===================================================================
-bool TryCopyBufferWithRetries(int handle, int buf, int start, int count, double &outArr[])
-{
-   const int RETRIES = 3;
-   for (int attempt = 0; attempt < RETRIES; attempt++)
+   double highs[], lows[];
+   if (CopyHigh(symbol, timeframe, 0, period, highs) <= 0 ||
+       CopyLow(symbol, timeframe, 0, period, lows) <= 0)
    {
-      if (CopyBuffer(handle, buf, start, count, outArr) > 0)
-         return true;
-        Sleep(100);
+      Print("ダイバージェンス判定用の価格データ取得に失敗しました。");
+      return (DIVERGENCE_NONE);
    }
-   return false;
+   ArraySetAsSeries(highs, true);
+   ArraySetAsSeries(lows, true);
+
+   int high_idx[10];
+   int low_idx[10];
+   FindPeaks(highs, period, true, minDistance, peakCount, high_idx);
+   FindPeaks(lows, period, false, minDistance, peakCount, low_idx);
+
+   bool usedIndi[200];
+   ArrayInitialize(usedIndi, false);
+   int indiHigh[10];
+   int indiLow[10];
+   for (int i = 0; i < peakCount; i++)
+   {
+      if (high_idx[i] >= 0)
+         indiHigh[i] = FindIndicatorPeak(indicator, high_idx[i], period, true, win, usedIndi);
+      else
+         indiHigh[i] = -1;
+      if (low_idx[i] >= 0)
+         indiLow[i] = FindIndicatorPeak(indicator, low_idx[i], period, false, win, usedIndi);
+      else
+         indiLow[i] = -1;
+   }
+
+   bool bearish = false;
+   bool bullish = false;
+   if (high_idx[0] >= 0 && high_idx[1] >= 0 && high_idx[2] >= 0 && indiHigh[0] >= 0 && indiHigh[1] >= 0 && indiHigh[2] >= 0)
+   {
+      if (highs[high_idx[0]] < highs[high_idx[1]] && highs[high_idx[1]] < highs[high_idx[2]] &&
+          indicator[indiHigh[0]] > indicator[indiHigh[1]] && indicator[indiHigh[1]] > indicator[indiHigh[2]])
+         bearish = true;
+   }
+   if (low_idx[0] >= 0 && low_idx[1] >= 0 && low_idx[2] >= 0 && indiLow[0] >= 0 && indiLow[1] >= 0 && indiLow[2] >= 0)
+   {
+      // 簡略化：詳細な判定ロジックは省略
+      if (lows[low_idx[0]] > lows[low_idx[1]] && lows[low_idx[1]] > lows[low_idx[2]] &&
+          indicator[indiLow[0]] < indicator[indiLow[1]] && indicator[indiLow[1]] < indicator[indiLow[2]])
+         bullish = true;
+   }
+
+   if (bullish && !bearish)
+      return DIVERGENCE_BULLISH;
+   if (bearish && !bullish)
+      return DIVERGENCE_BEARISH;
+   if (bearish && bullish)
+      return DIVERGENCE_CONFLICT;
+   return DIVERGENCE_NONE;
 }
 
 // ===================================================================
-// SuperTrend 計算補助（参照渡しの配列）
-// ===================================================================
-bool ComputeSuperTrendLocal(const string symbol, ENUM_TIMEFRAMES tf, int atrP, double mult, int bars, double &outST[], int &outDir[])
-{
-    int need = bars + 5;
-    double highs[], lows[], closes[], atrArr[];
-    if (CopyHigh(symbol, tf, 1, need, highs) <= 0 ||
-        CopyLow(symbol, tf, 1, need, lows) <= 0 ||
-        CopyClose(symbol, tf, 1, need, closes) <= 0)
-        return (false);
-    int atrH = iATR(symbol, tf, atrP);
-    if (atrH == INVALID_HANDLE) return (false);
-    ArrayResize(atrArr, need);
-    if (CopyBuffer(atrH, 0, 1, need, atrArr) <= 0) { IndicatorRelease(atrH); return (false); }
-
-    ArraySetAsSeries(highs, true);
-    ArraySetAsSeries(lows, true);
-    ArraySetAsSeries(closes, true);
-    ArraySetAsSeries(atrArr, true);
-
-    double basicUpper[], basicLower[], finalUpper[], finalLower[], finalST[];
-    ArrayResize(basicUpper, need);
-    ArrayResize(basicLower, need);
-    ArrayResize(finalUpper, need);
-    ArrayResize(finalLower, need);
-    ArrayResize(finalST, need);
-
-    for (int i = 0; i < need; i++)
-    {
-        double hl2 = (highs[i] + lows[i]) / 2.0;
-        basicUpper[i] = hl2 + mult * atrArr[i];
-        basicLower[i] = hl2 - mult * atrArr[i];
-    }
-    for (int i = 0; i < need; i++)
-    {
-        if (i == 0) { finalUpper[i] = basicUpper[i]; finalLower[i] = basicLower[i]; }
-        else
-        {
-            finalUpper[i] = (basicUpper[i] < finalUpper[i - 1] || closes[i - 1] > finalUpper[i - 1]) ? basicUpper[i] : finalUpper[i - 1];
-            finalLower[i] = (basicLower[i] > finalLower[i - 1] || closes[i - 1] < finalLower[i - 1]) ? basicLower[i] : finalLower[i - 1];
-        }
-        if (i == 0) finalST[i] = finalUpper[i];
-        else finalST[i] = (closes[i - 1] <= finalUpper[i - 1]) ? finalLower[i] : finalUpper[i];
-    }
-
-    ArrayResize(outST, bars);
-    ArrayResize(outDir, bars);
-    for (int j = 0; j < bars; j++)
-    {
-        outST[j] = finalST[j];
-        outDir[j] = (closes[j] >= finalST[j]) ? 1 : -1;
-    }
-    IndicatorRelease(atrH);
-    return (true);
-}
-
-// ===================================================================
-// H1/M15/M1 用クラス（M1を追加）
-//  - 各クラスは Calculate() を持ち、内部で指標を取得し、必要情報を getter で提供
-//  - M15 クラスはダイバージェンスとMACDクロスの判定を行う
+// H1 用クラス
+// ADX と EMA を使ってトレンド/レンジ種別や方向性を判定する
 // ===================================================================
 class CTrend1H
 {
 private:
-    TrendType m_type;
-    TrendState m_state;
-    double m_value;
-    int adxH, emaSh, emaLh;
+   TrendType m_type;
+   TrendState m_state;
+   double m_value;
+   int h_adx;
+   int h_emaS;
+   int h_emaL;
 public:
-    CTrend1H() { m_type = TREND_UNKNOWN; m_state = STATE_UNKNOWN; m_value = 0.0; adxH = emaSh = emaLh = INVALID_HANDLE; }
-    void Init(int _adxH, int _emaSh, int _emaLh) { adxH = _adxH; emaSh = _emaSh; emaLh = _emaLh; }
-    bool Calculate()
-    {
-        // OnInit 側でハンドルの検証を行っているためここでは行わない
-        const int need = MathMax(3, adxPeriod);
-        double adxArr[], diP[], diM[], emaS[], emaL[];
-        bool fail_adx = false, fail_diP = false, fail_diM = false, fail_emaS = false, fail_emaL = false;
+   CTrend1H() { m_type = TREND_UNKNOWN; m_state = STATE_UNKNOWN; m_value = 0.0; h_adx = h_emaS = h_emaL = INVALID_HANDLE; }
+   void Init(int _h_adx, int _h_emaS, int _h_emaL) { h_adx = _h_adx; h_emaS = _h_emaS; h_emaL = _h_emaL; }
+   bool Calculate()
+   {
+      datetime lastH1BarTime = iTime(_Symbol, PERIOD_H1, 0);
+      datetime nowTime = TimeCurrent();
+      int timeDiffSeconds = (int)(nowTime - lastH1BarTime);
+      const int SKIP_THRESHOLD_SECONDS = 3600; // 1時間
 
-        if (!TryCopyBufferWithRetries(adxH, 0, 1, need, adxArr)) fail_adx = true;
-        if (!TryCopyBufferWithRetries(adxH, 1, 1, need, diP)) fail_diP = true;
-        if (!TryCopyBufferWithRetries(adxH, 2, 1, need, diM)) fail_diM = true;
-        if (!TryCopyBufferWithRetries(emaSh, 0, 1, need, emaS)) fail_emaS = true;
-        if (!TryCopyBufferWithRetries(emaLh, 0, 1, need, emaL)) fail_emaL = true;
+      // 前回の取得が全て成功していれば、新しい足を待つ（OnTimer で呼ばれる想定なら不要）
+      if (g_h1AllOk && timeDiffSeconds >= SKIP_THRESHOLD_SECONDS)
+      {
+         PrintFormat("1時間足更新スキップ: 最終更新 %s 現在 %s 次回足更新まで待機", TimeToString(lastH1BarTime), TimeToString(nowTime));
+         return(true);
+      }
 
-        // 取得失敗があれば処理せず抜ける（最新足の更新もしない）
-        if (fail_adx || fail_diP || fail_diM || fail_emaS || fail_emaL)
-        {
-            return(false);
-        }
-        ArraySetAsSeries(adxArr, true);
-        ArraySetAsSeries(diP, true);
-        ArraySetAsSeries(diM, true);
-        ArraySetAsSeries(emaS, true);
-        ArraySetAsSeries(emaL, true);
+      const int need = 3;
+      double adxArr[], dipArr[], dimArr[], emaSArr[], emaLArr[];
 
-        PrintFormat("H1 指標: ADX=%.3f, DI+ = %.3f, DI- = %.3f, EMA_S=%.5f, EMA_L=%.5f", adxArr[0], diP[0], diM[0], emaS[0], emaL[0]);
+      // 各指標ごとに、直近成功キャッシュがあれば再取得しない
+      int copied_adx = 0, copied_dip = 0, copied_dim = 0, copied_emaS = 0, copied_emaL = 0;
 
-        m_value = adxArr[0];
+      if (g_h1_adx_ok)
+      {
+         ArrayResize(adxArr, need);
+         for (int i=0;i<need;i++) adxArr[i] = g_h1_adxArr[i];
+         copied_adx = need;
+      }
+      else
+      {
+         copied_adx = CopyBuffer(h_adx, 0, 0, need, adxArr);
+         if (copied_adx < need) copied_adx = CopyBuffer(h_adx, 0, 0, need, adxArr); // 1回だけリトライ
+         if (copied_adx >= need)
+         {
+            for (int i=0;i<need && i<ArraySize(adxArr); i++) g_h1_adxArr[i] = adxArr[i];
+            g_h1_adx_ok = true;
+         }
+      }
 
-        // ADX：4段階（18未満：レンジ、25～：弱トレンド、40～：強トレンド、その他：相場不明）
-        if (adxArr[0] < adxRangeThreshold)
-        {
-            m_type = TREND_RANGE;
-        }
-        else if (adxArr[0] >= adxStrongThreshold)
-        {
-            bool diUp = (diP[0] > diM[0]);
-            bool emaUp = (emaS[0] > emaL[0]);
-            if (diUp == emaUp)
-            {
-                if (diUp) m_type = TREND_STRONG_UP; else m_type = TREND_STRONG_DOWN;
-            }
-            else
-            {
-                if (diUp) m_type = TREND_WEAK_UP; else m_type = TREND_WEAK_DOWN;
-            }
-        }
-        else if (adxArr[0] >= adxThreshold)
-        {
-            double diDiff = MathAbs(diP[0] - diM[0]);
-            if (diDiff >= diThreshold)
-            {
-                if (diP[0] > diM[0]) m_type = TREND_WEAK_UP;
-                else m_type = TREND_WEAK_DOWN;
-            }
-            else
-            {
-                m_type = TREND_UNKNOWN;
-            }
-        }
-        else
-        {
+      if (g_h1_dip_ok)
+      {
+         ArrayResize(dipArr, need);
+         for (int i=0;i<need;i++) dipArr[i] = g_h1_dipArr[i];
+         copied_dip = need;
+      }
+      else
+      {
+         copied_dip = CopyBuffer(h_adx, 1, 0, need, dipArr);
+         if (copied_dip < need) copied_dip = CopyBuffer(h_adx, 1, 0, need, dipArr);
+         if (copied_dip >= need)
+         {
+            for (int i=0;i<need && i<ArraySize(dipArr); i++) g_h1_dipArr[i] = dipArr[i];
+            g_h1_dip_ok = true;
+         }
+      }
+
+      if (g_h1_dim_ok)
+      {
+         ArrayResize(dimArr, need);
+         for (int i=0;i<need;i++) dimArr[i] = g_h1_dimArr[i];
+         copied_dim = need;
+      }
+      else
+      {
+         copied_dim = CopyBuffer(h_adx, 2, 0, need, dimArr);
+         if (copied_dim < need) copied_dim = CopyBuffer(h_adx, 2, 0, need, dimArr);
+         if (copied_dim >= need)
+         {
+            for (int i=0;i<need && i<ArraySize(dimArr); i++) g_h1_dimArr[i] = dimArr[i];
+            g_h1_dim_ok = true;
+         }
+      }
+
+      if (g_h1_emaS_ok)
+      {
+         ArrayResize(emaSArr, need);
+         for (int i=0;i<need;i++) emaSArr[i] = g_h1_emaSArr[i];
+         copied_emaS = need;
+      }
+      else
+      {
+         copied_emaS = CopyBuffer(h_emaS, 0, 0, need, emaSArr);
+         if (copied_emaS < need) copied_emaS = CopyBuffer(h_emaS, 0, 0, need, emaSArr);
+         if (copied_emaS >= need)
+         {
+            for (int i=0;i<need && i<ArraySize(emaSArr); i++) g_h1_emaSArr[i] = emaSArr[i];
+            g_h1_emaS_ok = true;
+         }
+      }
+
+      if (g_h1_emaL_ok)
+      {
+         ArrayResize(emaLArr, need);
+         for (int i=0;i<need;i++) emaLArr[i] = g_h1_emaLArr[i];
+         copied_emaL = need;
+      }
+      else
+      {
+         copied_emaL = CopyBuffer(h_emaL, 0, 0, need, emaLArr);
+         if (copied_emaL < need) copied_emaL = CopyBuffer(h_emaL, 0, 0, need, emaLArr);
+         if (copied_emaL >= need)
+         {
+            for (int i=0;i<need && i<ArraySize(emaLArr); i++) g_h1_emaLArr[i] = emaLArr[i];
+            g_h1_emaL_ok = true;
+         }
+      }
+
+      // 取得失敗判定
+      bool fail_adx = (copied_adx < need);
+      bool fail_dip = (copied_dip < need);
+      bool fail_dim = (copied_dim < need);
+      bool fail_emaS = (copied_emaS < need);
+      bool fail_emaL = (copied_emaL < need);
+
+      // 1つでも失敗があれば、全体フラグは false にして戻る
+      if (fail_adx || fail_dip || fail_dim || fail_emaS || fail_emaL)
+      {
+         g_h1AllOk = false;
+         PrintFormat("1時間足指標取得失敗：取得結果 (ADX=%d DI+=%d DI-=%d EMA短=%d EMA長=%d)", 
+                    copied_adx, copied_dip, copied_dim, copied_emaS, copied_emaL);
+         return(false);
+      }
+
+      // すべて取得成功 → 全体フラグを true
+      g_h1AllOk = true;
+
+      ArraySetAsSeries(adxArr, true);
+      ArraySetAsSeries(dipArr, true);
+      ArraySetAsSeries(dimArr, true);
+      ArraySetAsSeries(emaSArr, true);
+      ArraySetAsSeries(emaLArr, true);
+
+      double adx0 = adxArr[0], adx1 = adxArr[1], adx2 = adxArr[2];
+      double dip0 = dipArr[0], dim0 = dimArr[0];
+      double emaS0 = emaSArr[0], emaL0 = emaLArr[0];
+
+      bool adxAllAbove = (adx0 >= adxThreshold && adx1 >= adxThreshold && adx2 >= adxThreshold);
+      bool adxAllBelow = (adx0 < adxRangeThreshold && adx1 < adxRangeThreshold && adx2 < adxRangeThreshold);
+      bool adxAscending = (adx2 < adx1 && adx1 < adx0);
+      bool adxDescending = (adx2 > adx1 && adx1 > adx0);
+
+      // トレンド種別判定
+      if (adxAllBelow)
+      {
+         m_type = TREND_RANGE;
+      }
+      else if (adxAllAbove)
+      {
+         if (dip0 > dim0 && emaS0 > emaL0) m_type = TREND_STRONG_UP;
+         else if (dip0 > dim0 || emaS0 > emaL0) m_type = TREND_WEAK_UP;
+         else if (dip0 < dim0 && emaS0 < emaL0) m_type = TREND_STRONG_DOWN;
+         else if (dip0 < dim0 || emaS0 < emaL0) m_type = TREND_WEAK_DOWN;
+         else m_type = TREND_UNKNOWN;
+      }
+      else
+      {
+         // 中間領域: ADX の傾きと DI/EMA の方向で判定
+         if (dip0 > dim0 || emaS0 > emaL0)
+            m_type = TREND_WEAK_UP;
+         else if (dip0 < dim0 || emaS0 < emaL0)
+            m_type = TREND_WEAK_DOWN;
+         else
             m_type = TREND_UNKNOWN;
-        }
+      }
 
-        // トレンド状態判定：直近3本ADX[2][1][0]の変化パターンで判定
-        m_state = JudgeTrendState(adxArr, diP, diM);
-        return(true);
-    }
-    TrendType getType() const { return (m_type); }
-    TrendState getState() const { return (m_state); }
-    double getValue() const { return (m_value); }
+      // トレンド状態（加速/減速/維持）
+      if (adx0 > adx1) m_state = TREND_ACCELERATE;
+      else if (adx0 < adx1) m_state = TREND_DECELERATE;
+      else m_state = TREND_MAINTAIN;
 
-private:
-    // トレンド状態判定：[2]=2つ前、[1]=1つ前、[0]=最新足
-    TrendState JudgeTrendState(const double &adxArr[], const double &diP[], const double &diM[])
-    {
-        if (ArraySize(adxArr) < 3) return STATE_UNKNOWN;
-        
-        double adx0 = adxArr[0], adx1 = adxArr[1], adx2 = adxArr[2];
-        double dip0 = diP[0], dip1 = diP[1], dip2 = diP[2];
-        double dim0 = diM[0], dim1 = diM[1], dim2 = diM[2];
-        
-        bool adxAscending = (adx2 < adx1 && adx1 < adx0);  // [2]<[1]<[0]
-        bool adxDescending = (adx2 > adx1 && adx1 > adx0);  // [2]>[1]>[0]
-        
-        // 昇順・全てADX≧25：トレンド加速
-        if (adxAscending && adx2 >= adxThreshold && adx1 >= adxThreshold && adx0 >= adxThreshold)
-            return TREND_ACCELERATE;
-        
-        // 降順・全てADX≧25：トレンド減速
-        if (adxDescending && adx2 >= adxThreshold && adx1 >= adxThreshold && adx0 >= adxThreshold)
-            return TREND_DECELERATE;
-        
-        // 全てADX≧25・昇順/降順なし：トレンド維持
-        if (adx2 >= adxThreshold && adx1 >= adxThreshold && adx0 >= adxThreshold && !adxAscending && !adxDescending)
-            return TREND_MAINTAIN;
-        
-        // 全てADX<18：レンジ維持
-        if (adx2 < adxRangeThreshold && adx1 < adxRangeThreshold && adx0 < adxRangeThreshold)
-            return RANGE_MAINTAIN;
-        
-        // 昇順で[0]と[1]のいずれか/両方がADX≧25：レンジ⇒トレンド移行（DI確認）
-        if (adxAscending)
-        {
-            if ((adx0 >= adxThreshold && adx1 < adxThreshold && adx2 < adxThreshold) ||
-                (adx0 >= adxThreshold && adx1 >= adxThreshold && adx2 < adxThreshold))
-            {
-                if (CheckDIConfirmationForRangeToTrend(dip0, dip1, dip2, dim0, dim1, dim2))
-                    return RANGE_TO_TREND;
-            }
-        }
-        
-        // 降順で[0]と[1]のいずれか/両方がADX<18：トレンド⇒レンジ移行
-        if (adxDescending)
-        {
-            if ((adx0 < adxRangeThreshold && adx1 >= adxThreshold && adx2 >= adxThreshold) ||
-                (adx0 < adxRangeThreshold && adx1 < adxRangeThreshold && adx2 >= adxThreshold))
-                return TREND_TO_RANGE;
-        }
-        
-        return STATE_UNKNOWN;  // 条件に当てはまらない場合
-    }
-    
-    // DI確認ロジック：レンジ⇒トレンド移行時にDI+/-の上下関係入れ替わり≧2回は判定不能、1回以下かつDI差≥12で確定
-    bool CheckDIConfirmationForRangeToTrend(double dip0, double dip1, double dip2, 
-                                           double dim0, double dim1, double dim2)
-    {
-        int diOrder2 = (dip2 > dim2) ? 1 : -1;
-        int diOrder1 = (dip1 > dim1) ? 1 : -1;
-        int diOrder0 = (dip0 > dim0) ? 1 : -1;
-        
-        int switchCount = 0;
-        if (diOrder2 != diOrder1) switchCount++;
-        if (diOrder1 != diOrder0) switchCount++;
-        
-        if (switchCount >= 2)
-            return false;
-        
-        double diDiff = MathAbs(dip0 - dim0);
-        return (diDiff >= diThreshold);
+      m_value = adx0;
+      return(true);
+   }
+   TrendType getType() const { return(m_type); }
+   TrendState getState() const { return(m_state); }
+   double getValue() const { return(m_value); }
 };
 
+// ===================================================================
+// M15 用クラス
+// RSI と MACD を使ってトレンド状態・過熱感・ダイバージェンス・クロスを判定する
+// ===================================================================
 class CTrend15
 {
 private:
@@ -552,31 +621,103 @@ private:
 public:
     CTrend15() { m_state = STATE_UNKNOWN; m_overheat = OVERHEAT_NONE; m_div = DIVERGENCE_NONE; m_value = 0.0; m_macdCross = false; m_macdCrossDir = 0; rsiH = macdH = INVALID_HANDLE; }
     void Init(int _rsiH, int _macdH) { rsiH = _rsiH; macdH = _macdH; }
-    bool Calculate(TrendType h1Type)
+   bool Calculate(TrendType h1Type, datetime barTime)
     {
-        // OnInit 側でハンドルの検証を行っているためここでは行わない
-        const int need = 3;
-        double rsiArr[], macdMain[], macdSig[];
-        bool fail_rsi = false, fail_macdMain = false, fail_macdSig = false;
+        datetime lastM15BarTime = iTime(_Symbol, PERIOD_M15, 0);
+        datetime nowTime = TimeCurrent();
+        int timeDiffSeconds = (int)(nowTime - lastM15BarTime);
+        const int SKIP_THRESHOLD_SECONDS = 900;  // 15分
 
-        if (!TryCopyBufferWithRetries(rsiH, 0, 1, need, rsiArr)) fail_rsi = true;
-        if (!TryCopyBufferWithRetries(macdH, 0, 2, need + 1, macdMain)) fail_macdMain = true;
-        if (!TryCopyBufferWithRetries(macdH, 1, 2, need + 1, macdSig)) fail_macdSig = true;
+      // 前回の取得が全て成功していれば、新しい足を待つ
+      if (g_m15AllOk && timeDiffSeconds >= SKIP_THRESHOLD_SECONDS)
+      {
+         PrintFormat("15分足更新スキップ: 最終更新 %s 現在 %s 次回足更新まで待機", TimeToString(lastM15BarTime), TimeToString(nowTime));
+         m_value = 0.0;
+         m_state = STATE_UNKNOWN;
+         m_overheat = OVERHEAT_NONE;
+         m_div = DIVERGENCE_NONE;
+         m_macdCross = false;
+         m_macdCrossDir = 0;
+         return(true);
+      }
 
-        // 取得失敗があれば処理せず抜ける（最新足の更新もしない）
-        if (fail_rsi || fail_macdMain || fail_macdSig)
-        {
-            return(false);
-        }
-        // macdMain and macdSig are series; ensure length
-        ArraySetAsSeries(rsiArr, true);
-        ArraySetAsSeries(macdMain, true);
-        ArraySetAsSeries(macdSig, true);
+      const int need = 3;
+      double rsiArr[], macdMain[], macdSig[];
+
+      int copied_rsi = 0, copied_macdMain = 0, copied_macdSig = 0;
+
+      // RSI
+      if (g_m15_rsi_ok)
+      {
+         ArrayResize(rsiArr, need);
+         for (int i=0;i<need;i++) rsiArr[i] = g_m15_rsiArr[i];
+         copied_rsi = need;
+      }
+      else
+      {
+         copied_rsi = CopyBuffer(rsiH, 0, 1, need, rsiArr);
+         if (copied_rsi < need) copied_rsi = CopyBuffer(rsiH, 0, 1, need, rsiArr);
+         if (copied_rsi >= need)
+         {
+            for (int i=0;i<need && i<ArraySize(rsiArr); i++) g_m15_rsiArr[i] = rsiArr[i];
+            g_m15_rsi_ok = true;
+         }
+      }
+
+      // MACD (need+1 を取得)
+      int needmacd = need + 1;
+      if (g_m15_macd_ok)
+      {
+         ArrayResize(macdMain, needmacd);
+         ArrayResize(macdSig, needmacd);
+         for (int i=0;i<needmacd;i++) { macdMain[i] = g_m15_macdMainAll[i]; macdSig[i] = g_m15_macdSigAll[i]; }
+         copied_macdMain = needmacd; copied_macdSig = needmacd;
+      }
+      else
+      {
+         copied_macdMain = CopyBuffer(macdH, 0, 2, needmacd, macdMain);
+         copied_macdSig = CopyBuffer(macdH, 1, 2, needmacd, macdSig);
+         if (copied_macdMain < needmacd || copied_macdSig < needmacd)
+         {
+            // リトライ
+            if (copied_macdMain < needmacd) copied_macdMain = CopyBuffer(macdH, 0, 2, needmacd, macdMain);
+            if (copied_macdSig < needmacd) copied_macdSig = CopyBuffer(macdH, 1, 2, needmacd, macdSig);
+         }
+         if (copied_macdMain >= needmacd && copied_macdSig >= needmacd)
+         {
+            for (int i=0;i<needmacd && i<ArraySize(macdMain) && i<DIVERGENCE_PERIOD; i++)
+               g_m15_macdMainAll[i] = macdMain[i];
+            for (int i=0;i<needmacd && i<ArraySize(macdSig) && i<DIVERGENCE_PERIOD; i++)
+               g_m15_macdSigAll[i] = macdSig[i];
+            g_m15_macd_ok = true;
+         }
+      }
+
+      // 取得失敗判定
+      bool fail_rsi = (copied_rsi < need);
+      bool fail_macdMain = (copied_macdMain < (need + 1));
+      bool fail_macdSig = (copied_macdSig < (need + 1));
+
+      // 1つでも失敗があれば、全体フラグを false にして戻る
+      if (fail_rsi || fail_macdMain || fail_macdSig)
+      {
+         g_m15AllOk = false;
+         PrintFormat("15分足指標取得失敗：取得結果 (RSI=%d MACD_Main=%d MACD_Sig=%d)", 
+                  copied_rsi, copied_macdMain, copied_macdSig);
+         return(false);
+      }
+
+      // すべて取得成功 → 全体フラグ true
+      g_m15AllOk = true;
+
+      ArraySetAsSeries(rsiArr, true);
+      ArraySetAsSeries(macdMain, true);
+      ArraySetAsSeries(macdSig, true);
 
         double macdHist[3];
         for (int i = 0; i < need; i++) macdHist[i] = macdMain[i] - macdSig[i];
 
-        PrintFormat("M15 指標: RSI=%.3f, MACD_Hist=%.6f", rsiArr[0], macdHist[0]);
+        PrintFormat("15分足更新： RSI=%.3f, MACD_Hist=%.6f", rsiArr[0], macdHist[0]);
 
         // Overheat/divergence selection
         if (h1Type == TREND_RANGE || h1Type == TREND_UNKNOWN)
@@ -629,11 +770,37 @@ public:
             }
         }
 
-        // state heuristics
-        if (m_value > 0) m_state = TREND_ACCELERATE;
-        else if (m_value < 0) m_state = TREND_DECELERATE;
-        else m_state = TREND_MAINTAIN;
-        return(true);
+      // state heuristics
+      if (m_value > 0) m_state = TREND_ACCELERATE;
+      else if (m_value < 0) m_state = TREND_DECELERATE;
+      else m_state = TREND_MAINTAIN;
+
+      // Apply signal effects to globals so OnTimer need not duplicate logic
+      g_DivergenceM15 = m_div;
+      g_OverheatM15 = m_overheat;
+
+      bool hasDiv = (m_div != DIVERGENCE_NONE);
+      bool hasCross = m_macdCross;
+
+      if (hasDiv || hasCross)
+      {
+         g_M15Signal.barTime = barTime;
+         g_M15Signal.hasDiv = hasDiv;
+         g_M15Signal.divType = m_div;
+         g_M15Signal.hasMACDCross = hasCross;
+         g_M15Signal.macdCrossDir = m_macdCrossDir;
+         g_M15Signal.pendingNextM1 = true;
+         g_M15Signal.usedForEntry = false;
+         g_M15Signal.usedForClose = false;
+         PrintFormat("15分足更新： 時刻=%s ダイバージェンス：%s MACDクロス：%s -> 次の1分足で有効", TimeToString(barTime, TIME_DATE | TIME_SECONDS), DivergenceTypeToString(g_DivergenceM15), MACDCrossDirToString(m_macdCrossDir));
+      }
+      else
+      {
+         g_M15Signal.pendingNextM1 = false;
+         PrintFormat("15分足更新： 時刻=%s ダイバージェンス：なし MACDクロス：なし", TimeToString(barTime, TIME_DATE | TIME_SECONDS));
+      }
+
+      return(true);
     }
     TrendState getState() const { return (m_state); }
     OverheatType getOverheat() const { return (m_overheat); }
@@ -643,432 +810,942 @@ public:
     int    getMACDCrossDir() const { return (m_macdCrossDir); }
 };
 
-// --------------------- M1 クラス（1分足の取得／判定は OnTimer から呼ぶ） -----
+// ===================================================================
+// M1 用クラス
+// ボリンジャーバンド、ストキャスティクス、ATR、スーパートレンドを使って取引タイミングを計る
+// ===================================================================
 class CTrend1M
 {
 private:
-    int h_bb, h_stoch, h_atr;
+    int h_bb;        // ボリンジャーバンド指標ハンドル
+    int h_stoch;     // ストキャスティクス指標ハンドル
+    int h_atr;       // ATR指標ハンドル
+    int h_std;       // 標準偏差指標ハンドル
 public:
-    CTrend1M() { h_bb = h_stoch = h_atr = INVALID_HANDLE; }
-    void Init(int _h_bb, int _h_stoch, int _h_atr) { h_bb = _h_bb; h_stoch = _h_stoch; h_atr = _h_atr; }
+    CTrend1M() { h_bb = h_stoch = h_atr = h_std = INVALID_HANDLE; }
+    void Init(int _h_bb, int _h_stoch, int _h_atr, int _h_std) { h_bb = _h_bb; h_stoch = _h_stoch; h_atr = _h_atr; h_std = _h_std; }
     // Calculate: 更新があったタイミングの OnTimer から呼ぶ。グローバル配列 g_bb*, g_stoch*, g_atr*, g_superTrend* を更新する。
     bool Calculate()
     {
-        // OnInit 側でハンドルの検証を行っているためここでは行わない
-        const int need = CACHE_BARS;
-        double up[], mid[], low[], kArr[], dArr[], atrArr[];
-        bool fail_up = false, fail_mid = false, fail_low = false, fail_k = false, fail_d = false, fail_atr = false;
+        // 1分足の最終更新時間を取得
+        datetime lastM1BarTime = iTime(_Symbol, PERIOD_M1, 0);
+        datetime nowTime = TimeCurrent();
+        int timeDiffSeconds = (int)(nowTime - lastM1BarTime);
+        const int SKIP_THRESHOLD_SECONDS = 60;  // 1分
+        
+      // 前回の取得が全て成功していれば、新しい足を待つ
+      if (g_m1AllOk && timeDiffSeconds >= SKIP_THRESHOLD_SECONDS)
+      {
+         PrintFormat("1分足更新スキップ: 最終更新 %s 現在 %s 次回足更新まで待機", TimeToString(lastM1BarTime), TimeToString(nowTime));
+         // 指標値は0にする
+         ArrayInitialize(g_bbUpper, 0.0);
+         ArrayInitialize(g_bbMiddle, 0.0);
+         ArrayInitialize(g_bbLower, 0.0);
+         ArrayInitialize(g_stochK, 0.0);
+         ArrayInitialize(g_stochD, 0.0);
+         ArrayInitialize(g_atr, 0.0);
+         ArrayInitialize(g_superTrend, 0.0);
+         return(true);
+      }
 
-        if (!TryCopyBufferWithRetries(h_bb, 1, 1, need, up)) fail_up = true;
-        if (!TryCopyBufferWithRetries(h_bb, 0, 1, need, mid)) fail_mid = true;
-        if (!TryCopyBufferWithRetries(h_bb, 2, 1, need, low)) fail_low = true;
-        if (!TryCopyBufferWithRetries(h_stoch, 0, 1, need, kArr)) fail_k = true;
-        if (!TryCopyBufferWithRetries(h_stoch, 1, 1, need, dArr)) fail_d = true;
-        if (!TryCopyBufferWithRetries(h_atr, 0, 1, need, atrArr)) fail_atr = true;
+      const int need = CACHE_BARS;
+      // Bollinger Bands中値
+      double mid[];
+      // 標準偏差
+      double stdArr[];
+      // Stochastic %K線
+      double kArr[];
+      // Stochastic %D線
+      double dArr[];
+      // Average True Range（真の平均値幅）
+      double atrArr[];
 
-        // 取得失敗があれば処理せず抜ける（最新足の更新もしない）
-        if (fail_up || fail_mid || fail_low || fail_k || fail_d || fail_atr)
-        {
-            return(false);
-        }
+      int copied_mid = 0, copied_std = 0, copied_k = 0, copied_d = 0, copied_atr = 0;
 
-        ArraySetAsSeries(up, true);
-        ArraySetAsSeries(mid, true);
-        ArraySetAsSeries(low, true);
-        ArraySetAsSeries(kArr, true);
-        ArraySetAsSeries(dArr, true);
-        ArraySetAsSeries(atrArr, true);
+      if (g_m1_bb_ok)
+      {
+         ArrayResize(mid, need); for (int i=0;i<need;i++) mid[i] = g_m1_midArr[i]; copied_mid = need;
+      }
+      else
+      {
+         copied_mid = CopyBuffer(h_bb, 0, 1, need, mid);
+         if (copied_mid < need) copied_mid = CopyBuffer(h_bb, 0, 1, need, mid);
+         if (copied_mid >= need) { for (int i=0;i<need && i<ArraySize(mid); i++) g_m1_midArr[i] = mid[i]; g_m1_bb_ok = true; }
+      }
 
+      if (g_m1_std_ok)
+      {
+         ArrayResize(stdArr, need); for (int i=0;i<need;i++) stdArr[i] = g_m1_stdArr[i]; copied_std = need;
+      }
+      else
+      {
+         copied_std = CopyBuffer(h_std, 0, 1, need, stdArr);
+         if (copied_std < need) copied_std = CopyBuffer(h_std, 0, 1, need, stdArr);
+         if (copied_std >= need) { for (int i=0;i<need && i<ArraySize(stdArr); i++) g_m1_stdArr[i] = stdArr[i]; g_m1_std_ok = true; }
+      }
+
+      if (g_m1_stoch_ok)
+      {
+         ArrayResize(kArr, need); ArrayResize(dArr, need);
+         for (int i=0;i<need;i++) { kArr[i] = g_m1_kArr[i]; dArr[i] = g_m1_dArr[i]; }
+         copied_k = need; copied_d = need;
+      }
+      else
+      {
+         copied_k = CopyBuffer(h_stoch, 0, 1, need, kArr);
+         copied_d = CopyBuffer(h_stoch, 1, 1, need, dArr);
+         if (copied_k < need) copied_k = CopyBuffer(h_stoch, 0, 1, need, kArr);
+         if (copied_d < need) copied_d = CopyBuffer(h_stoch, 1, 1, need, dArr);
+         if (copied_k >= need && copied_d >= need) { for (int i=0;i<need && i<ArraySize(kArr); i++) { g_m1_kArr[i]=kArr[i]; g_m1_dArr[i]=dArr[i]; } g_m1_stoch_ok = true; }
+      }
+
+      if (g_m1_atr_ok)
+      {
+         ArrayResize(atrArr, need); for (int i=0;i<need;i++) atrArr[i] = g_m1_atrArr[i]; copied_atr = need;
+      }
+      else
+      {
+         copied_atr = CopyBuffer(h_atr, 0, 1, need, atrArr);
+         if (copied_atr < need) copied_atr = CopyBuffer(h_atr, 0, 1, need, atrArr);
+         if (copied_atr >= need) { for (int i=0;i<need && i<ArraySize(atrArr); i++) g_m1_atrArr[i] = atrArr[i]; g_m1_atr_ok = true; }
+      }
+
+      // 取得失敗判定
+      bool fail_mid = (copied_mid < need);
+      bool fail_std = (copied_std < need);
+      bool fail_k = (copied_k < need);
+      bool fail_d = (copied_d < need);
+      bool fail_atr = (copied_atr < need);
+
+      // 1つでも失敗があれば、全体フラグを false にして戻る
+      if (fail_mid || fail_std || fail_k || fail_d || fail_atr)
+      {
+         g_m1AllOk = false;
+         PrintFormat("1分足指標取得失敗：取得結果 (BB中=%d 標偏=%d K=%d D=%d ATR=%d)", 
+                  copied_mid, copied_std, copied_k, copied_d, copied_atr);
+         return(false);
+      }
+
+      // すべて取得成功 → 全体フラグを true
+      g_m1AllOk = true;
+
+      ArraySetAsSeries(mid, true);
+      ArraySetAsSeries(stdArr, true);
+      ArraySetAsSeries(kArr, true);
+      ArraySetAsSeries(dArr, true);
+      ArraySetAsSeries(atrArr, true);
+
+        // BB上下帯計算
         for (int i = 0; i < need; i++)
         {
-            g_bbUpper[i] = up[i];
             g_bbMiddle[i] = mid[i];
-            g_bbLower[i] = low[i];
-            g_stochK[i] = kArr[i];
-            g_stochD[i] = dArr[i];
-            g_atr[i] = atrArr[i];
+            g_bbUpper[i] = mid[i] + (stdArr[i] * bbDeviation);
+            g_bbLower[i] = mid[i] - (stdArr[i] * bbDeviation);
         }
+        g_stochK[0] = kArr[0];
+        g_stochD[0] = dArr[0];
+        g_atr[0] = atrArr[0];
 
-        // SuperTrend を計算してグローバルに保存
-        double stVals[CACHE_BARS];
-        int stDir[CACHE_BARS];
-        ArrayInitialize(stVals, 0.0);
-        ArrayInitialize(stDir, 0);
-        if (ComputeSuperTrendLocal(_Symbol, PERIOD_M1, atrPeriod, atrMultiplierSL, CACHE_BARS, stVals, stDir))
+        // スーパートレンド計算：中値 ± ATR×倍率
+        // 上昇トレンド時：hl2 + ATR×倍率  下降トレンド時：hl2 - ATR×倍率
+        double hl2 = g_bbMiddle[0];
+        double superTrendBull = hl2 + atrMultiplierSL * g_atr[0];
+        double superTrendBear = hl2 - atrMultiplierSL * g_atr[0];
+        
+        double lastPrice = iClose(_Symbol, PERIOD_M1, 0);
+        
+        // トレンド方向判定：直近3足の終値の比較またはLastSuperTrendで判定
+        if (g_superTrendDir[1] > 0)
         {
-            for (int i = 0; i < CACHE_BARS; i++)
-            {
-                g_superTrend[i] = stVals[i];
-                g_superTrendDir[i] = stDir[i];
-            }
+            // 前回は上トレンド
+            g_superTrend[0] = superTrendBull;
+            g_superTrendDir[0] = (lastPrice > superTrendBull) ? 1 : -1;
+        }
+        else if (g_superTrendDir[1] < 0)
+        {
+            // 前回は下トレンド
+            g_superTrend[0] = superTrendBear;
+            g_superTrendDir[0] = (lastPrice > superTrendBear) ? 1 : -1;
         }
         else
         {
-            for (int i = 0; i < CACHE_BARS; i++)
+            // 初期値：現在の価格がどちらのトレンドかで判定
+            if (lastPrice > superTrendBull)
             {
-                g_superTrend[i] = 0.0;
-                g_superTrendDir[i] = 0;
+               g_superTrend[0] = superTrendBull;
+               g_superTrendDir[0] = 1;  // 上昇トレンド
+            }
+            else if (lastPrice < superTrendBear)
+            {
+               g_superTrend[0] = superTrendBear;
+               g_superTrendDir[0] = -1;  // 下降トレンド
+            }
+            else
+            {
+               g_superTrend[0] = hl2;
+               g_superTrendDir[0] = 0;  // ニュートラル
             }
         }
 
-        // ログ出力（M1 の生データ）
-        PrintFormat("M1 更新: BB U/M/L=%.5f/%.5f/%.5f", g_bbUpper[0], g_bbMiddle[0], g_bbLower[0]);
-        PrintFormat("M1 更新: Stoch K/D=%.2f/%.2f ATR=%.5f ST=%.5f dir=%d", g_stochK[0], g_stochD[0], g_atr[0], g_superTrend[0], g_superTrendDir[0]);
+        // ログ
+        PrintFormat("1分足更新： BB中=%.5f BB上=%.5f BB下=%.5f Stoch_K=%.3f Stoch_D=%.3f ATR=%.5f",
+                    mid[0], g_bbUpper[0], g_bbLower[0], kArr[0], dArr[0], atrArr[0]);
+        PrintFormat("CTrend1M: グローバル保存済み BB上=%.5f BB中=%.5f BB下=%.5f StochK=%.3f StochD=%.3f ATR=%.5f",
+                    g_bbUpper[0], g_bbMiddle[0], g_bbLower[0], g_stochK[0], g_stochD[0], g_atr[0]);
+        PrintFormat("CTrend1M: SuperTrend=%.5f Dir=%d Bull=%.5f Bear=%.5f", 
+                    g_superTrend[0], g_superTrendDir[0], superTrendBull, superTrendBear);
+
         return(true);
     }
+
+   // Compute entry/exit prices and apply M15 signal effects; called from OnTimer when M1 updates
+   void ComputeEntryExit(TrendType h1Type)
+   {
+      // initialize all price/flag variables
+      g_closePriceBuy = 0.0;
+      g_closePriceSell = 0.0;
+      g_entryPriceBuy = 0.0;
+      g_entryPriceSell = 0.0;
+      g_canEntryBuy = false;
+      g_canEntrySell = false;
+      g_canCloseBuy = false;
+      g_canCloseSell = false;
+      g_entryThresholdCrossedBuy = false;
+      g_entryThresholdCrossedSell = false;
+      g_closeThresholdCrossedBuy = false;
+      g_closeThresholdCrossedSell = false;
+      g_M15LotMultiplier = 1.0;
+
+      // exit/entry price based on trend (range=>BB, trend=>SuperTrend with BB fallback)
+      if (h1Type == TREND_RANGE || h1Type == TREND_UNKNOWN)
+      {
+         // レンジ相場：BB ベース
+         g_closePriceBuy = g_bbLower[0];      // BUY決済はBB下限で
+         g_closePriceSell = g_bbUpper[0];    // SELL決済はBB上限で
+         g_entryPriceBuy = g_bbUpper[0];     // BUYエントリはBB上限で
+         g_entryPriceSell = g_bbLower[0];    // SELLエントリはBB下限で
+      }
+      else
+      {
+         // トレンド相場：SuperTrend ベース
+         if (g_superTrendDir[0] > 0)
+         {
+            // 上昇トレンド
+            g_entryPriceBuy = g_superTrend[0];
+            g_closePriceSell = g_superTrend[0];
+         }
+         else if (g_superTrendDir[0] < 0)
+         {
+            // 下降トレンド
+            g_entryPriceSell = g_superTrend[0];
+            g_closePriceBuy = g_superTrend[0];
+         }
+         else
+         {
+            // SuperTrend がニュートラル（0）のときは BB にフォールバック
+            g_closePriceBuy = g_bbLower[0];
+            g_closePriceSell = g_bbUpper[0];
+            g_entryPriceBuy = g_bbUpper[0];
+            g_entryPriceSell = g_bbLower[0];
+         }
+      }
+
+      // exit price via stochastic cross (optional override for exit)
+      if (g_stochK[1] > g_stochD[1] && g_stochK[0] < g_stochD[0] && g_stochK[0] > stochOverbought)
+      {
+         g_closePriceBuy = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         PrintFormat("OnTimer: BUY 決済価格を設定（Stoch） %.5f", g_closePriceBuy);
+      }
+      if (g_stochK[1] < g_stochD[1] && g_stochK[0] > g_stochD[0] && g_stochK[0] < stochOversold)
+      {
+         g_closePriceSell = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         PrintFormat("OnTimer: SELL 決済価格を設定（Stoch） %.5f", g_closePriceSell);
+      }
+
+      // 価格設定時に、実行可否フラグを同時に設定
+      if (g_entryPriceBuy > 0)
+         g_canEntryBuy = true;
+      if (g_entryPriceSell > 0)
+         g_canEntrySell = true;
+      if (g_closePriceBuy > 0)
+         g_canCloseBuy = true;
+      if (g_closePriceSell > 0)
+         g_canCloseSell = true;
+
+      // M15 シグナルによるロット倍率決定（Compute内で判定）
+      if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForEntry)
+      {
+         if (g_M15Signal.hasDiv)
+         {
+            if (g_M15Signal.divType == DIVERGENCE_BULLISH && g_entryPriceBuy > 0)
+               g_M15LotMultiplier = 1.2;
+            else if (g_M15Signal.divType == DIVERGENCE_BEARISH && g_entryPriceSell > 0)
+               g_M15LotMultiplier = 1.2;
+         }
+         if (g_M15Signal.hasMACDCross)
+         {
+            if (g_M15Signal.macdCrossDir == 1 && g_entryPriceBuy > 0)
+               g_M15LotMultiplier = MathMax(g_M15LotMultiplier, 1.15);
+            else if (g_M15Signal.macdCrossDir == -1 && g_entryPriceSell > 0)
+               g_M15LotMultiplier = MathMax(g_M15LotMultiplier, 1.15);
+         }
+         if (g_M15LotMultiplier != 1.0)
+            PrintFormat("OnTimer: M15 シグナル適用倍率 = %.2f", g_M15LotMultiplier);
+         // pendingNextM1 はここではクリアしない。OnTick が使用済みフラグを設定する
+      }
+
+      // エントリー価格と決済価格が矛盾するときは発注なし
+      if (g_entryPriceBuy > 0 && g_closePriceBuy > 0 && g_entryPriceBuy >= g_closePriceBuy)
+      {
+         PrintFormat("OnTimer: BUY entry %.5f >= close %.5f -> entry中止", g_entryPriceBuy, g_closePriceBuy);
+         g_entryPriceBuy = 0.0;
+         g_canEntryBuy = false;
+         g_entryThresholdCrossedBuy = false;
+      }
+      if (g_entryPriceSell > 0 && g_closePriceSell > 0 && g_entryPriceSell <= g_closePriceSell)
+      {
+         PrintFormat("OnTimer: SELL entry %.5f <= close %.5f -> entry中止", g_entryPriceSell, g_closePriceSell);
+         g_entryPriceSell = 0.0;
+         g_canEntrySell = false;
+         g_entryThresholdCrossedSell = false;
+      }
+
+      // トレンド時はポジションに対してSLトレール更新
+      if (h1Type != TREND_RANGE && h1Type != TREND_UNKNOWN)
+      {
+         for (int i = PositionsTotal() - 1; i >= 0; i--)
+         {
+            ulong ticket = PositionGetTicket(i);
+            if (!PositionSelectByTicket(ticket)) continue;
+            if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+            if (PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber) continue;
+
+            long ptype = PositionGetInteger(POSITION_TYPE);
+            double currSL = PositionGetDouble(POSITION_SL);
+            double newSL = currSL;
+            if (ptype == POSITION_TYPE_BUY && g_superTrendDir[0] > 0)
+            {
+               newSL = g_superTrend[0];
+               if (newSL > currSL)
+                  ModifyPositionSLTP(ticket, newSL, PositionGetDouble(POSITION_TP));
+            }
+            else if (ptype == POSITION_TYPE_SELL && g_superTrendDir[0] < 0)
+            {
+               newSL = g_superTrend[0];
+               if (newSL < currSL)
+                  ModifyPositionSLTP(ticket, newSL, PositionGetDouble(POSITION_TP));
+            }
+         }
+      }
+
+      // ログにエントリー／決済価格を出力
+      PrintFormat("OnTimer: M1 ENTRY BUY=%.5f SELL=%.5f  EXIT BUY=%.5f SELL=%.5f",
+               g_entryPriceBuy, g_entryPriceSell, g_closePriceBuy, g_closePriceSell);
+      PrintFormat("CTrend1M: 判定変数 g_entryThresholdCrossedBuy=%d g_entryThresholdCrossedSell=%d g_M15LotMultiplier=%.2f",
+               g_entryThresholdCrossedBuy ? 1 : 0, g_entryThresholdCrossedSell ? 1 : 0, g_M15LotMultiplier);
+   }
 };
 
 // ===================================================================
-// 注文／決済ヘルパー（日本語ログ）
+// 取引関連の補助関数
 // ===================================================================
-double GetAllowedLot(ENUM_ORDER_TYPE type, double price); // 前に宣言済み位置と入れ替え不要（実装は下部）
-
-// 実装は前と同様（省略せずに残す）
-// 省略している関数はファイル内で元実装と同等に保持します（省略箇所なし）
-// --- ここでは関数をそのまま定義します ---
-
-double GetAllowedLot(ENUM_ORDER_TYPE type, double price)
-{
-    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-    double allowed_margin = equity * RiskPercentEquity / 100.0;
-    double vol_min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    double vol_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-    double vol_max = MathMin(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), MaxLot);
-    if (vol_min <= 0 || vol_step <= 0) return (BaseLot);
-
-    double lo = vol_min, hi = vol_max, mid = vol_min;
-    for (int iter = 0; iter < 30; iter++)
-    {
-        mid = (lo + hi) / 2.0;
-        double steps = MathFloor(mid / vol_step + 1e-9);
-        mid = steps * vol_step;
-        if (mid < vol_min) mid = vol_min;
-        double margin = 0;
-        if (!OrderCalcMargin(type, _Symbol, mid, price, margin)) break;
-        if (margin <= allowed_margin) lo = mid + vol_step; else hi = mid - vol_step;
-        if (hi < lo) break;
-    }
-    double candidate = lo - vol_step;
-    candidate = MathMax(vol_min, candidate);
-    candidate = MathMin(candidate, vol_max);
-    double desired = BaseLot;
-    double finalLot = MathMin(candidate, MathMax(vol_min, desired));
-    double stepN = MathRound(finalLot / vol_step);
-    finalLot = stepN * vol_step;
-    finalLot = MathMax(vol_min, MathMin(vol_max, finalLot));
-    return (finalLot);
-}
-
 bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp, bool urgent = false)
 {
-    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK), bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double spreadPts = (ask - bid) / _Point;
-    if (spreadPts > MaxAllowedSpread) { PrintFormat("発注中止：スプレッドが大きすぎます (%.1f)", spreadPts); return (false); }
-    if (!CanReq(urgent)) { Print("発注中止：リクエスト制限により送信不可です。"); return (false); }
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double spreadPts = (ask - bid) / _Point;
+   if (spreadPts > MaxAllowedSpread)
+   {
+      PrintFormat("発注中止：スプレッドが大きすぎます (%.1f)", spreadPts);
+      return (false);
+   }
+   if (!CanReq(urgent))
+   {
+      Print("発注中止：リクエスト制限により送信不可です。");
+      return (false);
+   }
 
-    MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
-    req.action = TRADE_ACTION_DEAL;
-    req.symbol = _Symbol; req.volume = volume; req.deviation = 10; req.type_filling = ORDER_FILLING_FOK;
-    req.magic = MagicNumber; req.sl = sl; req.tp = tp; req.type = type;
-    if (!OrderSend(req, res))
-    {
-        PrintFormat("OrderSend 失敗 err=%d ret=%d", GetLastError(), res.retcode);
-        return (false);
-    }
-    RegReq();
-    PrintFormat("OrderSend 成功 type=%s ticket=%I64u lot=%.2f price=%.5f", type == ORDER_TYPE_BUY ? "BUY" : "SELL", res.order, volume, res.price);
-    return (true);
+   MqlTradeRequest req;
+   MqlTradeResult res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.symbol = _Symbol;
+   req.volume = volume;
+   req.deviation = 10;
+   req.type_filling = ORDER_FILLING_FOK;
+   req.magic = MagicNumber;
+   req.sl = sl;
+   req.tp = tp;
+   req.type = type;
+   if (!OrderSend(req, res))
+   {
+      PrintFormat("OrderSend 失敗 err=%d retcode=%d comment=%s", GetLastError(), res.retcode, res.comment);
+      return (false);
+   }
+   RegReq();
+   PrintFormat("OrderSend 成功 type=%s ticket=%I64u order=%I64u deal=%I64u lot=%.2f price=%.5f retcode=%d comment=%s",
+               type == ORDER_TYPE_BUY ? "BUY" : "SELL",
+               res.order, res.order, res.deal, volume, res.price, res.retcode, res.comment);
+   return (true);
 }
 
+// ===================================================================
+// ポジションの決済と逆指値更新の補助関数
+// ===================================================================
 bool ClosePositionByTicket(ulong ticket)
 {
-    if (!PositionSelectByTicket(ticket)) return (false);
-    long ptype = PositionGetInteger(POSITION_TYPE);
-    double vol = PositionGetDouble(POSITION_VOLUME);
-    if (!CanReq(false)) { Print("決済中止：リクエスト制限により送信不可です。"); return (false); }
+   if (!PositionSelectByTicket(ticket))
+      return (false);
+   long ptype = PositionGetInteger(POSITION_TYPE);
+   double vol = PositionGetDouble(POSITION_VOLUME);
+   if (!CanReq(false))
+   {
+      Print("決済中止：リクエスト制限により送信不可です。");
+      return (false);
+   }
 
-    MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
-    req.action = TRADE_ACTION_DEAL; req.position = ticket;
-    req.symbol = _Symbol; req.volume = vol; req.deviation = 10; req.type_filling = ORDER_FILLING_FOK; req.magic = MagicNumber;
-    req.type = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-    if (!OrderSend(req, res)) { PrintFormat("決済失敗 err=%d ret=%d", GetLastError(), res.retcode); return (false); }
-    RegReq();
-    PrintFormat("決済成功 ticket=%I64u deal=%I64u", ticket, res.order);
-    return (true);
+   MqlTradeRequest req;
+   MqlTradeResult res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.position = ticket;
+   req.symbol = _Symbol;
+   req.volume = vol;
+   req.deviation = 10;
+   req.type_filling = ORDER_FILLING_FOK;
+   req.magic = MagicNumber;
+   req.type = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   if (!OrderSend(req, res))
+   {
+      PrintFormat("決済失敗 err=%d ret=%d", GetLastError(), res.retcode);
+      return (false);
+   }
+   RegReq();
+   PrintFormat("決済成功 ticket=%I64u deal=%I64u", ticket, res.order);
+   return (true);
 }
 
+// ===================================================================
+// ポジションの逆指値更新の補助関数
+// ===================================================================
 bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
 {
-    if (!trade.PositionModify(ticket, newSL, newTP)) { PrintFormat("逆指値更新失敗 err=%d", GetLastError()); return (false); }
-    RegReq(); PrintFormat("逆指値更新 成功 ticket=%I64u", ticket); return (true);
+   if (!trade.PositionModify(ticket, newSL, newTP))
+   {
+      PrintFormat("逆指値更新失敗 err=%d", GetLastError());
+      return (false);
+   }
+   RegReq();
+   PrintFormat("逆指値更新 成功 ticket=%I64u", ticket);
+   return (true);
 }
 
 // ===================================================================
-// インスタンスと状態
-// ===================================================================
-CTrend1H TrendH1;
-CTrend15 TrendM15;
-CTrend1M TrendM1;
-
-datetime LastH1 = 0, LastM15 = 0, LastM1 = 0;
-int TotalPositions = 0, NowPositions = 0, BuyCount = 0, SellCount = 0;
-
-// ===================================================================
-// メイン関数群
-// ===================================================================
+// メイン関数軍
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
 int OnInit()
 {
-    StartTimeGlobal = TimeCurrent();
-    PrintFormat("EA開始時刻: %s", TimeToString(StartTimeGlobal, TIME_DATE | TIME_SECONDS));
+   StartTimeGlobal = TimeCurrent();
+   PrintFormat("EA開始時刻: %s", TimeToString(StartTimeGlobal, TIME_DATE | TIME_SECONDS));
 
-    EventSetTimer(1);
+   EventSetTimer(1);
 
-    h_adx = iADX(_Symbol, PERIOD_H1, adxPeriod);
-    if (h_adx == INVALID_HANDLE) { Print("ADXハンドルの作成に失敗しました。"); return (INIT_FAILED); }
+   h_adx = iADX(_Symbol, PERIOD_H1, adxPeriod);
+   if (h_adx == INVALID_HANDLE)
+   {
+      Print("ADXハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    h_emaS = iMA(_Symbol, PERIOD_H1, emaShortPeriod, 0, MODE_EMA, PRICE_CLOSE);
-    h_emaL = iMA(_Symbol, PERIOD_H1, emaLongPeriod, 0, MODE_EMA, PRICE_CLOSE);
-    if (h_emaS == INVALID_HANDLE || h_emaL == INVALID_HANDLE) { Print("EMAハンドルの作成に失敗しました。"); return (INIT_FAILED); }
+   h_emaS = iMA(_Symbol, PERIOD_H1, emaShortPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   h_emaL = iMA(_Symbol, PERIOD_H1, emaLongPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if (h_emaS == INVALID_HANDLE || h_emaL == INVALID_HANDLE)
+   {
+      Print("EMAハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    h_rsi = iRSI(_Symbol, PERIOD_M15, rsiPeriod, PRICE_CLOSE);
-    if (h_rsi == INVALID_HANDLE) { Print("RSIハンドルの作成に失敗しました。"); return (INIT_FAILED); }
+   h_rsi = iRSI(_Symbol, PERIOD_M15, rsiPeriod, PRICE_CLOSE);
+   if (h_rsi == INVALID_HANDLE)
+   {
+      Print("RSIハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    h_macd = iMACD(_Symbol, PERIOD_M15, macdFast, macdSlow, macdSignal, PRICE_CLOSE);
-    if (h_macd == INVALID_HANDLE) { Print("MACDハンドルの作成に失敗しました。"); return (INIT_FAILED); }
+   h_macd = iMACD(_Symbol, PERIOD_M15, macdFast, macdSlow, macdSignal, PRICE_CLOSE);
+   if (h_macd == INVALID_HANDLE)
+   {
+      Print("MACDハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    h_bb = iBands(_Symbol, PERIOD_M1, bbPeriod, bbDeviation, 0, PRICE_CLOSE);
-    if (h_bb == INVALID_HANDLE) { Print("BBハンドルの作成に失敗しました。"); return (INIT_FAILED); }
+   h_bb = iBands(_Symbol, PERIOD_M1, bbPeriod, bbDeviation, 0, PRICE_CLOSE);
+   if (h_bb == INVALID_HANDLE)
+   {
+      Print("BBハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    h_stoch = iStochastic(_Symbol, PERIOD_M1, stochK, stochD, stochSlowing, MODE_SMA, 0);
-    if (h_stoch == INVALID_HANDLE) { Print("Stochasticハンドルの作成に失敗しました。"); return (INIT_FAILED); }
+   h_std = iStdDev(_Symbol, PERIOD_M1, bbPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   if (h_std == INVALID_HANDLE)
+   {
+      Print("StdDevハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    h_atr = iATR(_Symbol, PERIOD_M1, atrPeriod);
-    if (h_atr == INVALID_HANDLE) { Print("ATRハンドルの作成に失敗しました。"); return (INIT_FAILED); }
+   h_stoch = iStochastic(_Symbol, PERIOD_M1, stochK, stochD, stochSlowing, MODE_SMA, 0);
+   if (h_stoch == INVALID_HANDLE)
+   {
+      Print("Stochasticハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    TrendH1.Init(h_adx, h_emaS, h_emaL);
-    TrendM15.Init(h_rsi, h_macd);
-    TrendM1.Init(h_bb, h_stoch, h_atr);
+   h_atr = iATR(_Symbol, PERIOD_M1, atrPeriod);
+   if (h_atr == INVALID_HANDLE)
+   {
+      Print("ATRハンドルの作成に失敗しました。");
+      return (INIT_FAILED);
+   }
 
-    for (int i = 0; i < CACHE_BARS; i++)
-    {
-        g_bbUpper[i] = g_bbMiddle[i] = g_bbLower[i] = 0.0;
-        g_stochK[i] = g_stochD[i] = 0.0;
-        g_atr[i] = 0.0;
-        g_superTrend[i] = 0.0;
-        g_superTrendDir[i] = 0;
-    }
+   TrendH1.Init(h_adx, h_emaS, h_emaL);
+   TrendM15.Init(h_rsi, h_macd);
+   TrendM1.Init(h_bb, h_stoch, h_atr, h_std);
 
-    // M15 signal 初期化
-    g_M15Signal.barTime = 0;
-    g_M15Signal.hasDiv = false;
-    g_M15Signal.divType = DIVERGENCE_NONE;
-    g_M15Signal.hasMACDCross = false;
-    g_M15Signal.macdCrossDir = 0;
-    g_M15Signal.pendingNextM1 = false;
-    g_M15Signal.usedForEntry = false;
-    g_M15Signal.usedForClose = false;
+   for (int i = 0; i < CACHE_BARS; i++)
+   {
+      g_bbUpper[i] = g_bbMiddle[i] = g_bbLower[i] = 0.0;
+      g_stochK[i] = g_stochD[i] = 0.0;
+      g_atr[i] = 0.0;
+      g_superTrend[i] = 0.0;
+      g_superTrendDir[i] = 0;
+   }
 
-    return (INIT_SUCCEEDED);
+   // 価格・フラグ変数の初期化
+   g_closePriceBuy = g_closePriceSell = 0.0;
+   g_entryPriceBuy = g_entryPriceSell = 0.0;
+   g_canEntryBuy = g_canEntrySell = false;
+   g_canCloseBuy = g_canCloseSell = false;
+   g_entryThresholdCrossedBuy = g_entryThresholdCrossedSell = false;
+   g_closeThresholdCrossedBuy = g_closeThresholdCrossedSell = false;
+
+   // M15 signal 初期化
+   g_M15Signal.barTime = 0;
+   g_M15Signal.hasDiv = false;
+   g_M15Signal.divType = DIVERGENCE_NONE;
+   g_M15Signal.hasMACDCross = false;
+   g_M15Signal.macdCrossDir = 0;
+   g_M15Signal.pendingNextM1 = false;
+   g_M15Signal.usedForEntry = false;
+   g_M15Signal.usedForClose = false;
+
+   return (INIT_SUCCEEDED);
 }
 
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-    switch (reason)
-    {
-        case REASON_REMOVE: Print("EAを手動で終了しました。"); break;
-        case REASON_CHARTCHANGE:
-        case REASON_CHARTCLOSE:
-        case REASON_PARAMETERS:
-        case REASON_ACCOUNT:
-        case REASON_TEMPLATE:
-        case REASON_CLOSE: Print("EAが強制終了しました。"); break;
-        case REASON_INITFAILED: Print("EAの初期化に失敗しました。"); break;
-        default: PrintFormat("EAが終了しました。理由コード: %d", reason); break;
-    }
+   switch (reason)
+   {
+      case REASON_REMOVE:
+         Print("EAを手動で終了しました。");
+         break;
+      case REASON_CHARTCHANGE:
+      case REASON_CHARTCLOSE:
+      case REASON_PARAMETERS:
+      case REASON_ACCOUNT:
+      case REASON_TEMPLATE:
+      case REASON_CLOSE:
+         Print("EAが強制終了しました。");
+         break;
+      case REASON_INITFAILED:
+         Print("EAの初期化に失敗しました。");
+         break;
+      default:
+         PrintFormat("EAが終了しました。理由コード: %d", reason);
+         break;
+   }
 
-    if (h_adx != INVALID_HANDLE) IndicatorRelease(h_adx);
-    if (h_emaS != INVALID_HANDLE) IndicatorRelease(h_emaS);
-    if (h_emaL != INVALID_HANDLE) IndicatorRelease(h_emaL);
-    if (h_rsi != INVALID_HANDLE) IndicatorRelease(h_rsi);
-    if (h_macd != INVALID_HANDLE) IndicatorRelease(h_macd);
-    if (h_bb != INVALID_HANDLE) IndicatorRelease(h_bb);
-    if (h_stoch != INVALID_HANDLE) IndicatorRelease(h_stoch);
-    if (h_atr != INVALID_HANDLE) IndicatorRelease(h_atr);
+   if (h_adx != INVALID_HANDLE) IndicatorRelease(h_adx);
+   if (h_emaS != INVALID_HANDLE) IndicatorRelease(h_emaS);
+   if (h_emaL != INVALID_HANDLE) IndicatorRelease(h_emaL);
+   if (h_rsi != INVALID_HANDLE) IndicatorRelease(h_rsi);
+   if (h_macd != INVALID_HANDLE) IndicatorRelease(h_macd);
+   if (h_bb != INVALID_HANDLE) IndicatorRelease(h_bb);
+   if (h_std != INVALID_HANDLE) IndicatorRelease(h_std);
+   if (h_stoch != INVALID_HANDLE) IndicatorRelease(h_stoch);
+   if (h_atr != INVALID_HANDLE) IndicatorRelease(h_atr);
 
-    EventKillTimer();
-    Comment("");
-    PrintFormat("終了時の保有ポジション数: %d", PositionsTotal());
+   EventKillTimer();
+   Comment("");
+   PrintFormat("終了時の保有ポジション数: %d", PositionsTotal());
 }
 
+// ===================================================================
+// ヘルパー関数: 決済処理
+// グローバル変数 g_canCloseBuy/Sell, g_closeThresholdCrossedBuy/Sell を使用
+// ===================================================================
+void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice, double currentPrice)
+{
+   if (!canClose || closePrice <= 0)
+      return;
+
+   bool isBuy = (posType == POSITION_TYPE_BUY);
+   
+   // ブレイク後リトレース判定
+   bool condition;
+   
+   if (isBuy)
+   {
+      bool thresholdCrossed = g_closeThresholdCrossedBuy;
+      if (!thresholdCrossed)
+      {
+         // 1回目の閾値チェック
+         if (currentPrice <= closePrice)
+         {
+            thresholdCrossed = true;  // 閾値を超えたことを記録
+         }
+         condition = false;  // まだ戻りまでは決済しない
+      }
+      else
+      {
+         // 既に閾値を超えている＝戻り確認後に決済
+         condition = (currentPrice > closePrice);
+      }
+   }
+   else
+   {
+      bool thresholdCrossed = g_closeThresholdCrossedSell;
+      if (!thresholdCrossed)
+      {
+         // 1回目の閾値チェック
+         if (currentPrice >= closePrice)
+         {
+            thresholdCrossed = true;  // 閾値を超えたことを記録
+         }
+         condition = false;  // まだ戻りまでは決済しない
+      }
+      else
+      {
+         // 既に閾値を超えている＝戻り確認後に決済
+         condition = (currentPrice < closePrice);
+      }
+   }
+
+   if (!condition)
+      return;
+
+   int count = isBuy ? BuyCount : SellCount;
+   if (count <= 0)
+      return;
+
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(ticket))
+         continue;
+      if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if ((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      if (PositionGetInteger(POSITION_TYPE) != posType)
+         continue;
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double exitPrice = currentPrice;
+      double profit = isBuy ? (exitPrice - openPrice) * volume : (openPrice - exitPrice) * volume;
+      if (ClosePositionByTicket(ticket))
+      {
+         PrintFormat("OnTick: %s 決済 ticket=%I64u entry=%.5f exit=%.5f profit=%.5f",
+                     isBuy ? "BUY" : "SELL", ticket, openPrice, exitPrice, profit);
+         if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForClose)
+         {
+            g_M15Signal.usedForClose = true;
+            g_M15Signal.pendingNextM1 = false;
+            Print("OnTick: M15 シグナル（決済）を適用しました。");
+         }
+      }
+   }
+}
+
+// ===================================================================
+// ヘルパー関数: エントリー処理
+// グローバル変数 g_canEntryBuy/Sell, g_entryThresholdCrossedBuy/Sell を使用
+// ===================================================================
+void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice, double currentPrice, double ask, double bid)
+{
+   if (!canEntry || entryPrice <= 0)
+      return;
+
+   bool isBuy = (posType == POSITION_TYPE_BUY);
+   bool condition;
+
+   if (isBuy)
+   {
+      bool thresholdCrossed = g_entryThresholdCrossedBuy;
+      // エントリ閾値は一度超えた（ブレイク）後に戻ってきた場合にのみ有効にする
+      if (!thresholdCrossed)
+      {
+         // まだ閾値を超えていなければ、超えたことを記録するのみ
+         if (ask > entryPrice)
+            thresholdCrossed = true;
+         condition = false; // 超えるまではエントリさせない
+      }
+      else
+      {
+         // 既に閾値を超えている場合、戻ってきたらエントリ
+         condition = (ask <= entryPrice);
+      }
+   }
+   else
+   {
+      bool thresholdCrossed = g_entryThresholdCrossedSell;
+      // SELL側も同様に、まず閾値を超えたことを確認してから、戻りでエントリ
+      if (!thresholdCrossed)
+      {
+         if (bid < entryPrice)
+            thresholdCrossed = true;
+         condition = false;
+      }
+      else
+      {
+         condition = (bid >= entryPrice);
+      }
+   }
+
+   if (!condition)
+      return;
+
+   double price = currentPrice;
+   double sl = isBuy ? (price - SL_Points * _Point) : (price + SL_Points * _Point);
+   double tp = 0.0;
+   if (g_TrendTypeH == TREND_RANGE || g_TrendTypeH == TREND_UNKNOWN)
+      tp = isBuy ? (price + SL_Points * RiskRewardRatio * _Point) : (price - SL_Points * RiskRewardRatio * _Point);
+   double lot = 1.0;
+
+   double vol_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vol_min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if (vol_step <= 0)
+      vol_step = 0.01;
+   if (vol_min <= 0)
+      vol_min = vol_step;
+
+   // ロット計算: トレンド時=1.0, 追撃(chase)=0.7, レンジ=0.5 に BaseLot を掛ける
+   double lotMultiplier = 1.0;
+   if (g_TrendTypeH == TREND_RANGE || g_TrendTypeH == TREND_UNKNOWN)
+      lotMultiplier = 0.5; // レンジ
+   else
+   {
+      // トレンド時。M15 シグナルがあり未使用なら追撃倍率を適用
+      if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForEntry)
+         lotMultiplier = 0.7; // 追撃
+      else
+         lotMultiplier = 1.0; // 通常トレンド
+   }
+   lot = BaseLot * lotMultiplier;
+
+   // OnTimer で決めた倍率（例えばM15での強調）を適用
+   if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForEntry && g_M15LotMultiplier != 1.0)
+   {
+      lot = MathMin(lot * g_M15LotMultiplier, MaxLot);
+      g_M15Signal.usedForEntry = true;
+      // pendingNextM1 は OnTimer と OnTick の協調で管理するためここでは変更しない
+      PrintFormat("OnTick: M15 シグナルを初回エントリに適用しました。倍率=%.2f", g_M15LotMultiplier);
+   }
+
+   // 発注量をシンボルのステップに合わせる（丸め）
+   double steps = MathRound(lot / vol_step);
+   lot = MathMax(vol_min, steps * vol_step);
+
+   if (lot > 0)
+   {
+      ENUM_ORDER_TYPE orderType = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      if (SendMarketOrder(orderType, lot, sl, tp, false))
+         PrintFormat("OnTick: 条件達成により %s を発注しました。", isBuy ? "BUY" : "SELL");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
 void OnTick()
 {
-    double ASK = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double BID = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    if (ASK <= 0 || BID <= 0) { PrintFormat("無効な価格データ ASK= %.3f ,BID= %.3f", ASK, BID); return; }
-    double spreadPts = (ASK - BID) / _Point;
-    PrintFormat("OnTick: ASK=%.5f BID=%.5f スプレッド(pips)=%.1f", ASK, BID, spreadPts);
+   double ASK = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double BID = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double spreadPts = (ASK - BID) / _Point;
+   PrintFormat("OnTick: ASK=%.5f BID=%.5f スプレッド(pips)=%.1f", ASK, BID, spreadPts);
 
-    if (spreadPts >= MaxAllowedSpread) { Print("OnTick: スプレッド閾値を超えたため処理を中止します。"); return; }
+   if (ASK <= 0 || BID <= 0)
+   {
+      Print("価格データが無効のため処理を中断します。");
+      return;
+   }
 
-    // 決済判定（OnTimer で M1 のシグナルが決まっている想定。ただしここでは OnTimer が設定した g_superTrend/g_stoch etc. を参照して実行）
-    // 例としてストキャスのクロスでの決済を優先するロジックを示す
-    if (g_stochK[1] > g_stochD[1] && g_stochK[0] < g_stochD[0] && g_stochK[0] > stochOverbought)
-    {
-        // BUY 決済
-        for (int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            ulong ticket = PositionGetTicket(i);
-            if (!PositionSelectByTicket(ticket)) continue;
-            if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-            if ((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
-            {
-                if (ClosePositionByTicket(ticket))
-                {
-                    PrintFormat("OnTick: ストキャスにより BUY を決済しました ticket=%I64u", ticket);
-                    // M15 シグナルの適用状況を更新（初回決済に対する適用）
-                    if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForClose)
-                    {
-                        g_M15Signal.usedForClose = true;
-                        Print("OnTick: M15 シグナル（決済）を適用しました。");
-                    }
-                }
-            }
-        }
-    }
-    else if (g_stochK[1] < g_stochD[1] && g_stochK[0] > g_stochD[0] && g_stochK[0] < stochOversold)
-    {
-        // SELL 決済
-        for (int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            ulong ticket = PositionGetTicket(i);
-            if (!PositionSelectByTicket(ticket)) continue;
-            if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-            if ((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
-            {
-                if (ClosePositionByTicket(ticket))
-                {
-                    PrintFormat("OnTick: ストキャスにより SELL を決済しました ticket=%I64u", ticket);
-                    if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForClose)
-                    {
-                        g_M15Signal.usedForClose = true;
-                        Print("OnTick: M15 シグナル（決済）を適用しました。");
-                    }
-                }
-            }
-        }
-    }
+   // BuyCount/SellCount の判定をg_closePrice 判定より前に移動
+   NowPositions = 0;
+   BuyCount = 0;
+   SellCount = 0;
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(ticket))
+         continue;
+      if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if ((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      NowPositions++;
+      if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+         BuyCount++;
+      else if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+         SellCount++;
+   }
 
-    // エントリ判定（OnTimer で更新された M1 指標を利用）
-    // レンジ: BB タッチ + ストキャス条件
-    // トレンド: SuperTrend/EMA/DI 等の整合が取れていること + プルバック
-    // M15 シグナル（ダイバージェンス／MACDクロス）が pendingNextM1 の場合は初回の発注に対して補強ロジックとして扱う
-    // 実際の発注判断をここで行う（簡易的）
+   // 決済処理
+   ClosePositions(g_canCloseBuy, POSITION_TYPE_BUY, g_closePriceBuy, ASK);
+   ClosePositions(g_canCloseSell, POSITION_TYPE_SELL, g_closePriceSell, BID);
 
-    // 例: レンジ下帯タッチで BUY
-    double low = iLow(_Symbol, PERIOD_M1, 1);
-    double high = iHigh(_Symbol, PERIOD_M1, 1);
-    if ((g_TrendTypeH == TREND_RANGE || g_TrendTypeH == TREND_UNKNOWN) &&
-        low <= g_bbLower[0] + 0.5 * _Point && g_stochK[0] < g_stochD[0])
-    {
-        double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        double sl = price - SL_Points * _Point;
-        double tp = price + SL_Points * RiskRewardRatio * _Point;
-        double lot = MathMin(lot_range, GetAllowedLot(ORDER_TYPE_BUY, price));
+   // 決済後にスプレッド閾値チェック（スプレッドが大きければエントリを中止）
+   if (spreadPts >= MaxAllowedSpread)
+   {
+      Print("スプレッドが閾値を超えたため処理を中断します。");
+      return;
+   }
 
-        // M15 シグナルがあれば、初回発注に適用してボリュームや条件を微調整（例示）
-        if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForEntry)
-        {
-            // 例: ダイバージェンス強気の場合追加ボリュームを少し増やす
-            if (g_M15Signal.hasDiv && g_M15Signal.divType == DIVERGENCE_BULLISH)
-            {
-                lot = MathMin(lot * 1.2, MaxLot);
-                g_M15Signal.usedForEntry = true;
-                Print("OnTick: M15 のダイバージェンス（強気）を初回エントリに適用しました。");
-            }
-            // MACD ゴールデンクロスがあれば補強
-            else if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir == 1)
-            {
-                lot = MathMin(lot * 1.15, MaxLot);
-                g_M15Signal.usedForEntry = true;
-                Print("OnTick: M15 の MACD ゴールデンクロスを初回エントリに適用しました。");
-            }
-        }
-
-        if (lot > 0)
-        {
-            if (SendMarketOrder(ORDER_TYPE_BUY, lot, sl, tp, false))
-                Print("OnTick: レンジ下帯接触により BUY を発注しました。");
-        }
-    }
-    // 例: レンジ上帯タッチで SELL
-    if ((g_TrendTypeH == TREND_RANGE || g_TrendTypeH == TREND_UNKNOWN) &&
-        high >= g_bbUpper[0] - 0.5 * _Point && g_stochK[0] > g_stochD[0])
-    {
-        double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-        double sl = price + SL_Points * _Point;
-        double tp = price - SL_Points * RiskRewardRatio * _Point;
-        double lot = MathMin(lot_range, GetAllowedLot(ORDER_TYPE_SELL, price));
-
-        if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForEntry)
-        {
-            if (g_M15Signal.hasDiv && g_M15Signal.divType == DIVERGENCE_BEARISH)
-            {
-                lot = MathMin(lot * 1.2, MaxLot);
-                g_M15Signal.usedForEntry = true;
-                Print("OnTick: M15 のダイバージェンス（弱気）を初回エントリに適用しました。");
-            }
-            else if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir == -1)
-            {
-                lot = MathMin(lot * 1.15, MaxLot);
-                g_M15Signal.usedForEntry = true;
-                Print("OnTick: M15 の MACD デッドクロスを初回エントリに適用しました。");
-            }
-        }
-
-        if (lot > 0)
-        {
-            if (SendMarketOrder(ORDER_TYPE_SELL, lot, sl, tp, false))
-                Print("OnTick: レンジ上帯接触により SELL を発注しました。");
-        }
-    }
+   // エントリ判定は OnTimer で算出した価格・フラグを使用
+   EnterPosition(g_canEntryBuy, POSITION_TYPE_BUY, g_entryPriceBuy, ASK, ASK, BID);
+   EnterPosition(g_canEntrySell, POSITION_TYPE_SELL, g_entryPriceSell, BID, ASK, BID);
 }
 
+//+------------------------------------------------------------------+
+//| Trade function                                                   |
+//+------------------------------------------------------------------+
 void OnTrade()
 {
-    TotalPositions = PositionsTotal();
-    NowPositions = 0; BuyCount = 0; SellCount = 0;
-    for (int i = 0; i < TotalPositions; i++)
-    {
-        ulong ticket = PositionGetTicket(i);
-        if (!PositionSelectByTicket(ticket)) continue;
-        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        if ((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-        NowPositions++;
-        if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) BuyCount++; else SellCount++;
-    }
-    PrintFormat("OnTrade: ポジション数更新 buy=%d sell=%d total=%d", BuyCount, SellCount, NowPositions);
+   TotalPositions = PositionsTotal();
+   NowPositions = 0;
+   BuyCount = 0;
+   SellCount = 0;
+   for (int i = 0; i < TotalPositions; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(ticket))
+         continue;
+      if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if ((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      NowPositions++;
+      if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+         BuyCount++;
+      else
+         SellCount++;
+   }
+   PrintFormat("OnTrade: ポジション数更新 buy=%d sell=%d total=%d", BuyCount, SellCount, NowPositions);
 }
 
+//+------------------------------------------------------------------+
+//| TradeTransaction function                                        |
+//+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
 {
-    switch (trans.type)
-    {
-        case TRADE_TRANSACTION_ORDER_ADD: PrintFormat("注文追加: チケット=%I64u", trans.order); break;
-        case TRADE_TRANSACTION_ORDER_DELETE: PrintFormat("注文取消: チケット=%I64u", trans.order); break;
-        case TRADE_TRANSACTION_ORDER_UPDATE: PrintFormat("注文更新: チケット=%I64u", trans.order); break;
-        case TRADE_TRANSACTION_DEAL_ADD:
-            AddTradeHistoryTimestamp(TimeCurrent());
-            PrintFormat("約定発生: position=%I64u deal=%I64u", trans.position, trans.deal);
-            break;
-        case TRADE_TRANSACTION_POSITION:
-            PrintFormat("ポジション情報変更: position=%I64u", trans.position);
-            break;
-        default: break;
-    }
+   switch (trans.type)
+   {
+      case TRADE_TRANSACTION_ORDER_ADD:
+         PrintFormat("注文追加: チケット=%I64u", trans.order);
+         break;
+      case TRADE_TRANSACTION_ORDER_DELETE:
+         PrintFormat("注文取消: チケット=%I64u", trans.order);
+         break;
+      case TRADE_TRANSACTION_ORDER_UPDATE:
+         PrintFormat("注文更新: チケット=%I64u", trans.order);
+         break;
+      case TRADE_TRANSACTION_DEAL_ADD:
+         AddTradeHistoryTimestamp(TimeCurrent());
+         PrintFormat("約定発生: position=%I64u deal=%I64u", trans.position, trans.deal);
+         break;
+      case TRADE_TRANSACTION_POSITION:
+         PrintFormat("ポジション情報変更: position=%I64u", trans.position);
+         break;
+      default:
+         break;
+   }
 }
 
+string TrendTypeToString(TrendType t)
+{
+   switch(t)
+   {
+      case TREND_STRONG_UP:
+         return "強い上昇トレンド";
+      case TREND_WEAK_UP:
+         return "弱い上昇トレンド";
+      case TREND_STRONG_DOWN:
+         return "強い下降トレンド";
+      case TREND_WEAK_DOWN:
+         return "弱い下降トレンド";
+      case TREND_RANGE:
+         return "レンジ相場";
+      case TREND_UNKNOWN:
+         return "相場不明";
+      default:
+         return "不明";
+   }
+}
+
+string TrendStateToString(TrendState s)
+{
+   switch(s)
+   {
+      case TREND_ACCELERATE:
+         return "トレンド加速";
+      case TREND_DECELERATE:
+         return "トレンド減速";
+      case TREND_MAINTAIN:
+         return "トレンド維持";
+      case RANGE_MAINTAIN:
+         return "レンジ維持";
+      case RANGE_TO_TREND:
+         return "レンジ⇒トレンド移行";
+      case TREND_TO_RANGE:
+         return "トレンド⇒レンジ移行";
+      case STATE_UNKNOWN:
+         return "判定不能";
+      default:
+         return "不明";
+   }
+}
+
+string DivergenceTypeToString(DivergenceType d)
+{
+   switch(d)
+   {
+      case DIVERGENCE_NONE:
+         return "なし";
+      // 他のenumがあれば追加
+      default:
+         return "不明";
+   }
+}
+
+string MACDCrossDirToString(int dir)
+{
+   if (dir == 1)
+      return "上向き";
+   if (dir == -1)
+      return "下向き";
+   return "なし";
+}
+
+//+------------------------------------------------------------------+
+//| Timer function                                                   |
+//+------------------------------------------------------------------+
 void OnTimer()
 {
     datetime bH1 = iTime(_Symbol, PERIOD_H1, 0);
@@ -1083,104 +1760,42 @@ void OnTimer()
             g_TrendTypeH = TrendH1.getType();
             g_TrendStateH = TrendH1.getState();
             g_TrendValueH = TrendH1.getValue();
-            PrintFormat("OnTimer: 1時間足更新 時刻=%s Type=%d State=%d ADX=%.3f", TimeToString(bH1, TIME_DATE | TIME_SECONDS), g_TrendTypeH, g_TrendStateH, g_TrendValueH);
+            PrintFormat("OnTimer: 1時間足更新ができた 時刻=%s ADX=%.3f Type=%s State=%s",
+                        TimeToString(bH1, TIME_DATE | TIME_SECONDS), g_TrendValueH, TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH));
             LastH1 = bH1;
         }
         else
         {
-            PrintFormat("OnTimer: 1時間足 指標取得失敗 時刻=%s", TimeToString(bH1, TIME_DATE | TIME_SECONDS));
+            PrintFormat("OnTimer: 1時間足更新ができなかった 時刻=%s", TimeToString(bH1, TIME_DATE | TIME_SECONDS));
         }
     }
 
-    // M15 更新判定（ダイバージェンスとMACDクロス判定）
-    if (bM15 != LastM15)
-    {
-        if (TrendM15.Calculate(g_TrendTypeH))
-        {
-            g_TrendStateM15 = TrendM15.getState();
-            g_TrendValueM15 = TrendM15.getValue();
-            g_DivergenceM15 = TrendM15.getDivergence();
-            g_OverheatM15 = TrendM15.getOverheat();
+   // M15 更新判定（ダイバージェンスとMACDクロス判定）
+   if (bM15 != LastM15)
+   {
+      if (TrendM15.Calculate(g_TrendTypeH, bM15))
+      {
+         LastM15 = bM15;
+         PrintFormat("OnTimer: 15分足更新ができた 時刻=%s", TimeToString(bM15, TIME_DATE | TIME_SECONDS));
+      }
+      else
+      {
+         PrintFormat("OnTimer: 15分足更新ができなかった 時刻=%s", TimeToString(bM15, TIME_DATE | TIME_SECONDS));
+      }
+   }
 
-            // M15 シグナルの設定：ダイバ/クロスのいずれかがあれば next M1 足で有効にする
-            bool hasDiv = (g_DivergenceM15 != DIVERGENCE_NONE);
-            bool hasCross = TrendM15.getMACDCross();
-            int crossDir = TrendM15.getMACDCrossDir();
-
-            if (hasDiv || hasCross)
-            {
-                g_M15Signal.barTime = bM15;
-                g_M15Signal.hasDiv = hasDiv;
-                g_M15Signal.divType = g_DivergenceM15;
-                g_M15Signal.hasMACDCross = hasCross;
-                g_M15Signal.macdCrossDir = crossDir;
-                g_M15Signal.pendingNextM1 = true;
-                g_M15Signal.usedForEntry = false;
-                g_M15Signal.usedForClose = false;
-                PrintFormat("OnTimer: 15分足更新 時刻=%s Div=%d MACDcross=%d -> 次の1分足で有効", TimeToString(bM15, TIME_DATE | TIME_SECONDS), (int)g_M15Signal.divType, g_M15Signal.macdCrossDir);
-            }
-            else
-            {
-                // no signal
-                g_M15Signal.pendingNextM1 = false;
-                PrintFormat("OnTimer: 15分足更新 時刻=%s Div=なし MACDcross=なし", TimeToString(bM15, TIME_DATE | TIME_SECONDS));
-            }
-
-            LastM15 = bM15;
-        }
-        else
-        {
-            PrintFormat("OnTimer: 15分足 指標取得失敗 時刻=%s", TimeToString(bM15, TIME_DATE | TIME_SECONDS));
-        }
-    }
-
-    // M1 更新判定（指標を取得してグローバルに保存）
-    if (bM1 != LastM1)
-    {
-        TrendM1.Calculate();
-
-        // M15シグナルは「次の1分足でのみ有効」なので、ここで pending を消費対象にする（ただし使用フラグはエントリ/決済それぞれで OnTick 側が設定する）
-        if (g_M15Signal.pendingNextM1)
-        {
-            // pending をクリアして、OnTick の次の発注/決済で usedフラグをセットする運用にする
-            // pendingNextM1 をここで true->true のままにし、OnTick が利用したら usedForEntry/usedForClose を true にする設計でも可。
-            // 実装方針：pendingNextM1 はこの1分足の間だけ true のままとする。次の M1 更新時には自動的に false にする。
-            // （つまり、ここでは何もしない。After M1 bar completes, at end we will reset pendingNextM1）
-            // Reset will be done after small delay: set a marker that this pending corresponds to this M1 bar.
-            // For simplicity: keep pendingNextM1 true now; at the end of this block we set a timestamp for last pending M1 and then clear.
-            // We'll store barTimeHandled = LastM1Pending (use bar time)
-            // Implement a simple handling: store local variable handled below.
-        }
-
-        PrintFormat("OnTimer: 1分足更新 時刻=%s", TimeToString(bM1, TIME_DATE | TIME_SECONDS));
-
-        // After M1 is processed, clear pendingNextM1 so signal only valid for this one M1 bar
-        if (g_M15Signal.pendingNextM1)
-        {
-            // leave usedForEntry/usedForClose as-is; consumer (OnTick) sets them when using
-            // After this M1 bar (this call), we will clear pendingNextM1 so it's valid only during this M1 bar window (OnTick calls during this bar will see it)
-            // To ensure OnTick sees it, we delay clearing until end of OnTimer; however OnTick is called asynchronously many times per bar.
-            // We therefore keep pendingNextM1 true now and set a marker g_M15Signal.barTimeM1Valid = bM1 to indicate which M1 bar it's valid on.
-            // For simplicity, set barTime to bM1 and keep pendingNextM1 true; at next M1 update we'll clear it if it hasn't been refreshed.
-            g_M15Signal.barTime = bM1;
-        }
-
-        if (bM1 != LastM1)
-        {
-            if (TrendM1.Calculate())
-            {
-                // M15シグナルは「次の1分足でのみ有効」なので、ここで pending を消費対象にする（ただし使用フラグはエントリ/決済それぞれで OnTick 側が設定する）
-                if (g_M15Signal.pendingNextM1)
-                {
-                    g_M15Signal.barTime = bM1;
-                }
-
-                PrintFormat("OnTimer: 1分足更新 時刻=%s", TimeToString(bM1, TIME_DATE | TIME_SECONDS));
-
-                LastM1 = bM1;
-            }
-            else
-            {
-                PrintFormat("OnTimer: 1分足 指標取得失敗 時刻=%s", TimeToString(bM1, TIME_DATE | TIME_SECONDS));
-            }
-        }
+   // M1 更新判定（指標を取得してグローバルに保存）
+   if (bM1 != LastM1)
+   {
+      if (TrendM1.Calculate())
+      {
+         TrendM1.ComputeEntryExit(g_TrendTypeH);
+         LastM1 = bM1;
+         PrintFormat("OnTimer: 1分足更新ができた 時刻=%s", TimeToString(bM1, TIME_DATE | TIME_SECONDS));
+      }
+      else
+      {
+         PrintFormat("OnTimer: 1分足更新ができなかった 時刻=%s", TimeToString(bM1, TIME_DATE | TIME_SECONDS));
+      }
+   }
+}
