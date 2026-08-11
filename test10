@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "2.45"
+#property version   "3.01"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -23,13 +23,15 @@ CTrade trade;
 // ===================================================================
 input long   MagicNumber           = 3625;  // トレードの識別番号
 input double BaseLot               = 1.0;   // 基本ロットサイズ
-input double MaxLot                = 2.0;   // 最大ロットサイズ
-input double RiskPercentEquity     = 1.0;   // リスク率（%）
+input double MaxLot                = 2.0;   // 最大ロットサイズ（未実装：現時点では固定ロット方式を使用しており、資金連動ロット計算は使用していません）
+input double RiskPercentEquity     = 1.0;   // リスク率（%）（未実装：現時点では資金量連動ロット計算に使用していません）
 input int    Max_Positions_Range   = 1;     // レンジ相場での最大ポジション数
 input int    Max_Positions_Trend   = 10;    // トレンド相場での最大ポジション数
 input int    MaxAllowedSpread      = 25;    // 最大許容スプレッド（ポイント）
 input int    SL_Points             = 40;    // ストップロス幅（ポイント）
 input double RiskRewardRatio       = 2.0;   // リスク・リワード比率
+input double PullbackBuffer        = 0.03;  // SuperTrend pullback 判定のバッファ（価格単位）
+input double EntryBuffer           = 0.02;  // SuperTrend reacceleration 判定のバッファ（価格単位）
 
 // ===================================================================
 // 内部パラメータ（input にはしない）
@@ -160,6 +162,16 @@ DivergenceType g_M15MacdDivergence = DIVERGENCE_NONE; // M15 MACDダイバージ
 // 仕様上、旧来の1.15/1.2倍ロットは使用しないため保持のみ
  double g_M15LotMultiplier = 1.0;   // M15シグナル適用時のロット乗数
 
+int g_H1DiDir = 0;                // H1 DI 方向（1=UP, -1=DOWN, 0=UNKNOWN）
+int g_H1EmaDir = 0;               // H1 EMA 方向（1=UP, -1=DOWN, 0=UNKNOWN）
+
+datetime g_lastBuyEntryBarTime = 0;   // 同一方向 BUY 発注の直近 M1 確定バー時刻
+datetime g_lastSellEntryBarTime = 0;  // 同一方向 SELL 発注の直近 M1 確定バー時刻
+bool g_superTrendPullbackBuy = false;
+bool g_superTrendPullbackSell = false;
+bool g_superTrendReaccelBuy = false;
+bool g_superTrendReaccelSell = false;
+
 // ===================================================================
 // 価格変数とフラグ変数の分離
 // ===================================================================
@@ -175,6 +187,11 @@ bool g_canEntryBuy = false;        // BUY エントリー実行可フラグ（�
 bool g_canEntrySell = false;       // SELL エントリー実行可フラグ（初期OFF）
 bool g_canCloseBuy = false;        // BUY 決済実行可フラグ（初期OFF）
 bool g_canCloseSell = false;       // SELL 決済実行可フラグ（初期OFF）
+
+bool g_entryBuyOnOrBelow = false;  // BUY エントリー閾値は下抜け/以下基準か
+bool g_entrySellOnOrAbove = false; // SELL エントリー閾値は上抜け/以上基準か
+bool g_closeBuyOnOrAbove = false;  // BUY 決済閾値は上抜け/以上基準か
+bool g_closeSellOnOrBelow = false; // SELL 決済閾値は下抜け/以下基準か
 
 // エントリー判定フラグ：ブレイク後リトレース用
 bool g_entryThresholdCrossedBuy = false;   // BUY エントリー閾値超えフラグ（初期OFF）
@@ -217,6 +234,7 @@ double g_m1_midArr[CACHE_BARS], g_m1_stdArr[CACHE_BARS], g_m1_kArr[CACHE_BARS], 
 struct SM15Signal
 {
    datetime barTime;               // シグナル発生時刻
+   datetime expireM1BarTime;       // 次のM1足で消滅するタイミング
    bool hasDiv;                    // ダイバージェンス発生フラグ
    DivergenceType divType;         // ダイバージェンスの種別
    bool hasMACDCross;              // MACDクロスフラグ
@@ -332,20 +350,32 @@ void CollectPeakIndices(const double &values[], int count, bool higherIsPeak, in
    }
 }
 
-int GetDirectionFromTriplet(double a, double b, double c)
+int GetDirectionFromPoints(const double values[], int points)
 {
-   if (a < b && b < c)
-      return 1;
-   if (a > b && b > c)
-      return -1;
+   if (points == 3)
+   {
+      double a = values[0];
+      double b = values[1];
+      double c = values[2];
+      if (a < b && b < c)
+         return 1;
+      if (a > b && b > c)
+         return -1;
+      return 0;
+   }
+   if (points == 2)
+   {
+      if (values[0] < values[1])
+         return 1;
+      if (values[0] > values[1])
+         return -1;
+      return 0;
+   }
    return 0;
 }
 
 DivergenceType CheckDivergenceSeries(const double &price[], const double &indicator[], int count, bool useHighs)
 {
-   if (count < 3)
-      return DIVERGENCE_NONE;
-
    int priceIdx[3];
    int indiIdx[3];
    ArrayInitialize(priceIdx, -1);
@@ -353,20 +383,27 @@ DivergenceType CheckDivergenceSeries(const double &price[], const double &indica
    CollectPeakIndices(price, count, useHighs, 3, priceIdx);
    CollectPeakIndices(indicator, count, useHighs, 3, indiIdx);
 
-   bool hasPrice = true;
-   bool hasIndi = true;
+   int priceCount = 0;
+   int indiCount = 0;
    for (int i = 0; i < 3; i++)
    {
-      if (priceIdx[i] < 0)
-         hasPrice = false;
-      if (indiIdx[i] < 0)
-         hasIndi = false;
+      if (priceIdx[i] >= 0)
+         priceCount++;
+      if (indiIdx[i] >= 0)
+         indiCount++;
    }
-   if (!hasPrice || !hasIndi)
+   if (priceCount < 2 || indiCount < 2)
       return DIVERGENCE_NONE;
 
-   int priceDir = GetDirectionFromTriplet(price[priceIdx[0]], price[priceIdx[1]], price[priceIdx[2]]);
-   int indiDir = GetDirectionFromTriplet(indicator[indiIdx[0]], indicator[indiIdx[1]], indicator[indiIdx[2]]);
+   double priceValues[3];
+   double indiValues[3];
+   for (int i = 0; i < priceCount; i++)
+      priceValues[i] = price[priceIdx[i]];
+   for (int i = 0; i < indiCount; i++)
+      indiValues[i] = indicator[indiIdx[i]];
+
+   int priceDir = GetDirectionFromPoints(priceValues, priceCount);
+   int indiDir = GetDirectionFromPoints(indiValues, indiCount);
 
    if (useHighs)
    {
@@ -407,41 +444,44 @@ public:
       if (lastBar <= 0)
          return(false);
 
-      const int need = 4;
+      const int need = 3;
       double adxArr[], dipArr[], dimArr[], emaSArr[], emaLArr[];
       ArrayResize(adxArr, need);
       ArrayResize(dipArr, need);
       ArrayResize(dimArr, need);
       ArrayResize(emaSArr, need);
       ArrayResize(emaLArr, need);
-      int copied_adx = CopyBuffer(h_adx, 0, 0, need, adxArr);
-      int copied_dip = CopyBuffer(h_adx, 1, 0, need, dipArr);
-      int copied_dim = CopyBuffer(h_adx, 2, 0, need, dimArr);
-      int copied_emaS = CopyBuffer(h_emaS, 0, 0, need, emaSArr);
-      int copied_emaL = CopyBuffer(h_emaL, 0, 0, need, emaLArr);
+      int copied_adx = CopyBuffer(h_adx, 0, 1, need, adxArr);
+      int copied_dip = CopyBuffer(h_adx, 1, 1, need, dipArr);
+      int copied_dim = CopyBuffer(h_adx, 2, 1, need, dimArr);
+      int copied_emaS = CopyBuffer(h_emaS, 0, 1, need, emaSArr);
+      int copied_emaL = CopyBuffer(h_emaL, 0, 1, need, emaLArr);
 
       if (copied_adx < need || copied_dip < need || copied_dim < need || copied_emaS < need || copied_emaL < need)
       {
          g_h1AllOk = false;
+         g_h1_adx_ok = g_h1_dip_ok = g_h1_dim_ok = g_h1_emaS_ok = g_h1_emaL_ok = false;
          PrintFormat("1時間足指標取得失敗：ADX=%d DI+=%d DI-=%d EMA短=%d EMA長=%d", copied_adx, copied_dip, copied_dim, copied_emaS, copied_emaL);
          return(false);
       }
 
-      g_h1AllOk = true;
-      g_lastValidH1BarTime = lastBar;
       ArraySetAsSeries(adxArr, true);
       ArraySetAsSeries(dipArr, true);
       ArraySetAsSeries(dimArr, true);
       ArraySetAsSeries(emaSArr, true);
       ArraySetAsSeries(emaLArr, true);
 
-      double adxOld = adxArr[3];
-      double adxMid = adxArr[2];
-      double adxNew = adxArr[1];
-      double dipNew = dipArr[1];
-      double dimNew = dimArr[1];
-      double emaSNew = emaSArr[1];
-      double emaLNew = emaLArr[1];
+      double adxNew = adxArr[0];
+      double adxMid = adxArr[1];
+      double adxOld = adxArr[2];
+      double dipNew = dipArr[0];
+      double dimNew = dimArr[0];
+      double emaSNew = emaSArr[0];
+      double emaLNew = emaLArr[0];
+
+      g_h1AllOk = true;
+      g_h1_adx_ok = g_h1_dip_ok = g_h1_dim_ok = g_h1_emaS_ok = g_h1_emaL_ok = true;
+      g_lastValidH1BarTime = iTime(_Symbol, PERIOD_H1, 1);
       double diDiff = MathAbs(dipNew - dimNew);
 
       int diDir = 0;
@@ -552,18 +592,20 @@ public:
       ArrayResize(rsiBuffer, need);
       ArrayResize(mainBuffer, need);
       ArrayResize(sigBuffer, need);
-      int copied_rsi = CopyBuffer(rsiH, 0, 0, need, rsiBuffer);
-      int copied_main = CopyBuffer(macdH, 0, 0, need, mainBuffer);
-      int copied_sig = CopyBuffer(macdH, 1, 0, need, sigBuffer);
+      int copied_rsi = CopyBuffer(rsiH, 0, 1, need, rsiBuffer);
+      int copied_main = CopyBuffer(macdH, 0, 1, need, mainBuffer);
+      int copied_sig = CopyBuffer(macdH, 1, 1, need, sigBuffer);
       if (copied_rsi < need || copied_main < need || copied_sig < need)
       {
          g_m15AllOk = false;
+         g_m15_rsi_ok = g_m15_macd_ok = false;
          PrintFormat("15分足指標取得失敗：RSI=%d MACD_Main=%d MACD_Sig=%d", copied_rsi, copied_main, copied_sig);
          return(false);
       }
 
       g_m15AllOk = true;
-      g_lastValidM15BarTime = lastBar;
+      g_m15_rsi_ok = g_m15_macd_ok = true;
+      g_lastValidM15BarTime = iTime(_Symbol, PERIOD_M15, 1);
       ArraySetAsSeries(rsiBuffer, true);
       ArraySetAsSeries(mainBuffer, true);
       ArraySetAsSeries(sigBuffer, true);
@@ -572,10 +614,8 @@ public:
       double latestMacdMain = mainBuffer[0];
       double latestMacdSig = sigBuffer[0];
       double latestMacdHist = latestMacdMain - latestMacdSig;
-      double prevMain = mainBuffer[1];
-      double prevSig = sigBuffer[1];
-      double oldMain = mainBuffer[2];
-      double oldSig = sigBuffer[2];
+      double prevMacdMain = mainBuffer[1];
+      double prevMacdSig = sigBuffer[1];
 
       m_rsiValue = latestRsi;
       m_macdMain = latestMacdMain;
@@ -589,44 +629,49 @@ public:
 
       m_macdCross = false;
       m_macdCrossDir = 0;
-      if (oldMain <= oldSig && prevMain > prevSig)
+      if (prevMacdMain <= prevMacdSig && latestMacdMain > latestMacdSig)
       {
          m_macdCross = true;
          m_macdCrossDir = 1;
       }
-      else if (oldMain >= oldSig && prevMain < prevSig)
+      else if (prevMacdMain >= prevMacdSig && latestMacdMain < latestMacdSig)
       {
          m_macdCross = true;
          m_macdCrossDir = -1;
       }
 
       double priceHigh[], priceLow[];
-      double rsiSeries[], histSeries[];
+      double rsiSeries[];
       ArrayResize(priceHigh, DIVERGENCE_PERIOD);
       ArrayResize(priceLow, DIVERGENCE_PERIOD);
       ArrayResize(rsiSeries, DIVERGENCE_PERIOD);
-      ArrayResize(histSeries, DIVERGENCE_PERIOD);
       ArrayInitialize(priceHigh, 0.0);
       ArrayInitialize(priceLow, 0.0);
       ArrayInitialize(rsiSeries, 0.0);
-      ArrayInitialize(histSeries, 0.0);
-      if (CopyHigh(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceHigh) > 0 && CopyLow(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceLow) > 0 && CopyBuffer(rsiH, 0, 0, DIVERGENCE_PERIOD, rsiSeries) > 0)
+      bool priceOk = CopyHigh(_Symbol, PERIOD_M15, 1, DIVERGENCE_PERIOD, priceHigh) == DIVERGENCE_PERIOD && CopyLow(_Symbol, PERIOD_M15, 1, DIVERGENCE_PERIOD, priceLow) == DIVERGENCE_PERIOD;
+      bool rsiOk = CopyBuffer(rsiH, 0, 1, DIVERGENCE_PERIOD, rsiSeries) == DIVERGENCE_PERIOD;
+      if (priceOk && rsiOk)
       {
          ArraySetAsSeries(priceHigh, true);
          ArraySetAsSeries(priceLow, true);
          ArraySetAsSeries(rsiSeries, true);
          double rsiChrono[DIVERGENCE_PERIOD];
-         for (int i = 0; i < DIVERGENCE_PERIOD; i++)
-            rsiChrono[i] = rsiSeries[DIVERGENCE_PERIOD - 1 - i];
-         double highChrono[DIVERGENCE_PERIOD], lowChrono[DIVERGENCE_PERIOD];
+         double highChrono[DIVERGENCE_PERIOD];
+         double lowChrono[DIVERGENCE_PERIOD];
          for (int i = 0; i < DIVERGENCE_PERIOD; i++)
          {
+            rsiChrono[i] = rsiSeries[DIVERGENCE_PERIOD - 1 - i];
             highChrono[i] = priceHigh[DIVERGENCE_PERIOD - 1 - i];
             lowChrono[i] = priceLow[DIVERGENCE_PERIOD - 1 - i];
          }
-         m_rsiDiv = CheckDivergenceSeries(highChrono, rsiChrono, DIVERGENCE_PERIOD, true);
-         if (m_rsiDiv == DIVERGENCE_NONE)
-            m_rsiDiv = CheckDivergenceSeries(lowChrono, rsiChrono, DIVERGENCE_PERIOD, false);
+         DivergenceType rsiHigh = CheckDivergenceSeries(highChrono, rsiChrono, DIVERGENCE_PERIOD, true);
+         DivergenceType rsiLow = CheckDivergenceSeries(lowChrono, rsiChrono, DIVERGENCE_PERIOD, false);
+         if (rsiHigh == DIVERGENCE_BEARISH && rsiLow == DIVERGENCE_BULLISH)
+            m_rsiDiv = DIVERGENCE_CONFLICT;
+         else if (rsiHigh != DIVERGENCE_NONE)
+            m_rsiDiv = rsiHigh;
+         else
+            m_rsiDiv = rsiLow;
       }
       else
       {
@@ -638,21 +683,28 @@ public:
       ArrayResize(macdSigAll, DIVERGENCE_PERIOD);
       ArrayInitialize(macdMainAll, 0.0);
       ArrayInitialize(macdSigAll, 0.0);
-      if (CopyBuffer(macdH, 0, 0, DIVERGENCE_PERIOD, macdMainAll) > 0 && CopyBuffer(macdH, 1, 0, DIVERGENCE_PERIOD, macdSigAll) > 0)
+      bool macdOk = CopyBuffer(macdH, 0, 1, DIVERGENCE_PERIOD, macdMainAll) == DIVERGENCE_PERIOD && CopyBuffer(macdH, 1, 1, DIVERGENCE_PERIOD, macdSigAll) == DIVERGENCE_PERIOD;
+      if (priceOk && macdOk)
       {
          ArraySetAsSeries(macdMainAll, true);
          ArraySetAsSeries(macdSigAll, true);
          double histChrono[DIVERGENCE_PERIOD];
-         double priceHighChrono[DIVERGENCE_PERIOD], priceLowChrono[DIVERGENCE_PERIOD];
+         double highChrono[DIVERGENCE_PERIOD];
+         double lowChrono[DIVERGENCE_PERIOD];
          for (int i = 0; i < DIVERGENCE_PERIOD; i++)
          {
             histChrono[i] = macdMainAll[DIVERGENCE_PERIOD - 1 - i] - macdSigAll[DIVERGENCE_PERIOD - 1 - i];
-            priceHighChrono[i] = priceHigh[DIVERGENCE_PERIOD - 1 - i];
-            priceLowChrono[i] = priceLow[DIVERGENCE_PERIOD - 1 - i];
+            highChrono[i] = priceHigh[DIVERGENCE_PERIOD - 1 - i];
+            lowChrono[i] = priceLow[DIVERGENCE_PERIOD - 1 - i];
          }
-         m_macdDiv = CheckDivergenceSeries(priceHighChrono, histChrono, DIVERGENCE_PERIOD, true);
-         if (m_macdDiv == DIVERGENCE_NONE)
-            m_macdDiv = CheckDivergenceSeries(priceLowChrono, histChrono, DIVERGENCE_PERIOD, false);
+         DivergenceType macdHigh = CheckDivergenceSeries(highChrono, histChrono, DIVERGENCE_PERIOD, true);
+         DivergenceType macdLow = CheckDivergenceSeries(lowChrono, histChrono, DIVERGENCE_PERIOD, false);
+         if (macdHigh == DIVERGENCE_BEARISH && macdLow == DIVERGENCE_BULLISH)
+            m_macdDiv = DIVERGENCE_CONFLICT;
+         else if (macdHigh != DIVERGENCE_NONE)
+            m_macdDiv = macdHigh;
+         else
+            m_macdDiv = macdLow;
       }
       else
       {
@@ -677,6 +729,7 @@ public:
       if (hasSignal)
       {
          g_M15Signal.barTime = barTime;
+         g_M15Signal.expireM1BarTime = iTime(_Symbol, PERIOD_M1, 0) + PeriodSeconds(PERIOD_M1);
          g_M15Signal.hasDiv = (m_rsiDiv != DIVERGENCE_NONE || m_macdDiv != DIVERGENCE_NONE);
          g_M15Signal.divType = (m_rsiDiv != DIVERGENCE_NONE) ? m_rsiDiv : m_macdDiv;
          g_M15Signal.hasMACDCross = m_macdCross;
@@ -731,22 +784,24 @@ public:
       ArrayResize(kBuffer, need);
       ArrayResize(dBuffer, need);
       ArrayResize(atrBuffer, need);
-      int copied_mid = CopyBuffer(h_bb, 0, 0, need, midBuffer);
-      int copied_upper = CopyBuffer(h_bb, 1, 0, need, upperBuffer);
-      int copied_lower = CopyBuffer(h_bb, 2, 0, need, lowerBuffer);
-      int copied_k = CopyBuffer(h_stoch, 0, 0, need, kBuffer);
-      int copied_d = CopyBuffer(h_stoch, 1, 0, need, dBuffer);
-      int copied_atr = CopyBuffer(h_atr, 0, 0, need, atrBuffer);
+      int copied_mid = CopyBuffer(h_bb, 0, 1, need, midBuffer);
+      int copied_upper = CopyBuffer(h_bb, 1, 1, need, upperBuffer);
+      int copied_lower = CopyBuffer(h_bb, 2, 1, need, lowerBuffer);
+      int copied_k = CopyBuffer(h_stoch, 0, 1, need, kBuffer);
+      int copied_d = CopyBuffer(h_stoch, 1, 1, need, dBuffer);
+      int copied_atr = CopyBuffer(h_atr, 0, 1, need, atrBuffer);
 
       if (copied_mid < need || copied_upper < need || copied_lower < need || copied_k < need || copied_d < need || copied_atr < need)
       {
          g_m1AllOk = false;
+         g_m1_bb_ok = g_m1_std_ok = g_m1_stoch_ok = g_m1_atr_ok = false;
          PrintFormat("1分足指標取得失敗：BB中=%d BB上=%d BB下=%d K=%d D=%d ATR=%d", copied_mid, copied_upper, copied_lower, copied_k, copied_d, copied_atr);
          return(false);
       }
 
       g_m1AllOk = true;
-      g_lastValidM1BarTime = lastBar;
+      g_m1_bb_ok = g_m1_std_ok = g_m1_stoch_ok = g_m1_atr_ok = true;
+      g_lastValidM1BarTime = iTime(_Symbol, PERIOD_M1, 1);
       ArraySetAsSeries(midBuffer, true);
       ArraySetAsSeries(upperBuffer, true);
       ArraySetAsSeries(lowerBuffer, true);
@@ -765,10 +820,16 @@ public:
       g_atr[0] = atrBuffer[0];
 
       double prevClose = iClose(_Symbol, PERIOD_M1, 1);
-      double currClose = iClose(_Symbol, PERIOD_M1, 0);
-      double hl2 = (iHigh(_Symbol, PERIOD_M1, 0) + iLow(_Symbol, PERIOD_M1, 0)) / 2.0;
+      double currClose = iClose(_Symbol, PERIOD_M1, 1);
+      double hl2 = (iHigh(_Symbol, PERIOD_M1, 1) + iLow(_Symbol, PERIOD_M1, 1)) / 2.0;
       double upperBand = hl2 + atrMultiplierSL * atrBuffer[0];
       double lowerBand = hl2 - atrMultiplierSL * atrBuffer[0];
+      for (int i = need - 1; i > 0; i--)
+      {
+         g_superTrend[i] = g_superTrend[i - 1];
+         g_superTrendDir[i] = g_superTrendDir[i - 1];
+      }
+
       double trendValue = g_superTrend[1];
       int prevDir = (g_superTrendDir[1] > 0) ? 1 : ((g_superTrendDir[1] < 0) ? -1 : 0);
       if (prevDir > 0)
@@ -822,10 +883,14 @@ public:
 
       if (h1Type == TREND_RANGE || h1Type == TREND_UNKNOWN)
       {
-         g_closePriceBuy = g_bbLower[0];
-         g_closePriceSell = g_bbUpper[0];
-         g_entryPriceBuy = g_bbUpper[0];
-         g_entryPriceSell = g_bbLower[0];
+         g_entryPriceBuy = g_bbLower[0];
+         g_entryPriceSell = g_bbUpper[0];
+         g_closePriceBuy = g_bbUpper[0];
+         g_closePriceSell = g_bbLower[0];
+         g_entryBuyOnOrBelow = true;
+         g_entrySellOnOrAbove = true;
+         g_closeBuyOnOrAbove = false;
+         g_closeSellOnOrBelow = false;
       }
       else
       {
@@ -833,12 +898,27 @@ public:
          g_entryPriceSell = g_superTrend[0];
          g_closePriceBuy = g_superTrend[0];
          g_closePriceSell = g_superTrend[0];
+         g_entryBuyOnOrBelow = false;
+         g_entrySellOnOrAbove = false;
+         g_closeBuyOnOrAbove = false;
+         g_closeSellOnOrBelow = false;
       }
 
       if (g_stochK[0] > g_stochD[0] && g_stochK[0] > stochOverbought)
-         g_closePriceBuy = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         g_closePriceBuy = g_bbUpper[0];
       if (g_stochK[0] < g_stochD[0] && g_stochK[0] < stochOversold)
-         g_closePriceSell = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         g_closePriceSell = g_bbLower[0];
+
+      if (h1Type == TREND_RANGE || h1Type == TREND_UNKNOWN)
+      {
+         g_closeBuyOnOrAbove = true;
+         g_closeSellOnOrBelow = true;
+      }
+      else
+      {
+         g_closeBuyOnOrAbove = false;
+         g_closeSellOnOrBelow = false;
+      }
 
       if (g_entryPriceBuy > 0.0)
          g_canEntryBuy = true;
@@ -849,24 +929,17 @@ public:
       if (g_closePriceSell > 0.0)
          g_canCloseSell = true;
 
-      if (g_M15Signal.pendingNextM1 && !g_M15Signal.usedForEntry)
+      if (g_M15Signal.pendingNextM1)
       {
          g_M15LotMultiplier = 1.0;
-         if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir == 1 && g_entryPriceBuy > 0.0)
-            g_M15LotMultiplier = 1.0;
-         if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir == -1 && g_entryPriceSell > 0.0)
-            g_M15LotMultiplier = 1.0;
-         g_M15Signal.usedForEntry = true;
-         g_M15Signal.usedForClose = true;
-         g_M15Signal.pendingNextM1 = false;
       }
 
-      if (g_entryPriceBuy > 0.0 && g_closePriceBuy > 0.0 && g_entryPriceBuy >= g_closePriceBuy)
+      if (g_entryPriceBuy > 0.0 && g_closePriceBuy > 0.0 && g_entryPriceBuy > g_closePriceBuy)
       {
          g_entryPriceBuy = 0.0;
          g_canEntryBuy = false;
       }
-      if (g_entryPriceSell > 0.0 && g_closePriceSell > 0.0 && g_entryPriceSell <= g_closePriceSell)
+      if (g_entryPriceSell > 0.0 && g_closePriceSell > 0.0 && g_entryPriceSell < g_closePriceSell)
       {
          g_entryPriceSell = 0.0;
          g_canEntrySell = false;
@@ -1155,7 +1228,7 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
       return;
 
    bool isBuy = (posType == POSITION_TYPE_BUY);
-   bool condition = isBuy ? (currentPrice <= closePrice) : (currentPrice >= closePrice);
+   bool condition = isBuy ? (currentPrice >= closePrice) : (currentPrice <= closePrice);
    if (!condition)
       return;
 
@@ -1203,14 +1276,29 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       return;
 
    bool isBuy = (posType == POSITION_TYPE_BUY);
-   bool condition = isBuy ? (ask >= entryPrice) : (bid <= entryPrice);
-   if (!condition)
+   int sameDirCount = isBuy ? BuyCount : SellCount;
+   bool allowPyramid = false;
+   if (g_TrendTypeH == TREND_STRONG_UP && isBuy && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendReaccelBuy && sameDirCount > 0)
+      allowPyramid = true;
+   if (g_TrendTypeH == TREND_STRONG_DOWN && !isBuy && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendReaccelSell && sameDirCount > 0)
+      allowPyramid = true;
+
+   if (!allowPyramid && sameDirCount >= 1)
+      return;
+   if (allowPyramid && sameDirCount >= Max_Positions_Trend)
       return;
 
-   int maxAllowed = (g_TrendTypeH == TREND_STRONG_UP || g_TrendTypeH == TREND_STRONG_DOWN) ? Max_Positions_Trend : Max_Positions_Range;
-   if (isBuy && BuyCount >= maxAllowed)
+   if (isBuy && g_lastBuyEntryBarTime > 0 && LastM1 <= g_lastBuyEntryBarTime + PeriodSeconds(PERIOD_M1))
       return;
-   if (!isBuy && SellCount >= maxAllowed)
+   if (!isBuy && g_lastSellEntryBarTime > 0 && LastM1 <= g_lastSellEntryBarTime + PeriodSeconds(PERIOD_M1))
+      return;
+
+   bool condition = false;
+   if (isBuy)
+      condition = g_entryBuyOnOrBelow ? (ask <= entryPrice) : (ask >= entryPrice);
+   else
+      condition = g_entrySellOnOrAbove ? (bid >= entryPrice) : (bid <= entryPrice);
+   if (!condition)
       return;
 
    double price = currentPrice;
@@ -1222,10 +1310,11 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
    double lot = BaseLot;
    if (g_TrendTypeH == TREND_RANGE || g_TrendTypeH == TREND_UNKNOWN)
       lot *= lot_range;
-   else if (g_TrendTypeH == TREND_STRONG_UP || g_TrendTypeH == TREND_STRONG_DOWN)
-      lot *= lot_strong_pyramid;
    else
       lot *= lot_initial_trend;
+
+   if (allowPyramid)
+      lot = BaseLot * lot_strong_pyramid;
 
    double vol_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double vol_min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1246,6 +1335,10 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
             g_M15Signal.usedForEntry = true;
             g_M15Signal.pendingNextM1 = false;
          }
+         if (isBuy)
+            g_lastBuyEntryBarTime = LastM1;
+         else
+            g_lastSellEntryBarTime = LastM1;
          PrintFormat("OnTick: 条件達成により %s を発注しました。Lot=%.2f SL=%.5f TP=%.5f", isBuy ? "BUY" : "SELL", lot, sl, tp);
       }
    }
@@ -1288,8 +1381,8 @@ void OnTick()
    }
 
    // 決済処理
-   ClosePositions(g_canCloseBuy, POSITION_TYPE_BUY, g_closePriceBuy, ASK);
-   ClosePositions(g_canCloseSell, POSITION_TYPE_SELL, g_closePriceSell, BID);
+   ClosePositions(g_canCloseBuy, POSITION_TYPE_BUY, g_closePriceBuy, BID);
+   ClosePositions(g_canCloseSell, POSITION_TYPE_SELL, g_closePriceSell, ASK);
 
    // 決済後にスプレッド閾値チェック（スプレッドが大きければエントリを中止）
    if (spreadPts >= MaxAllowedSpread)
@@ -1482,6 +1575,12 @@ void OnTimer()
       {
          PrintFormat("OnTimer: 15分足更新ができなかった 時刻=%s", TimeToString(bM15, TIME_DATE | TIME_SECONDS));
       }
+   }
+
+   // M15 シグナルの有効期限管理
+   if (g_M15Signal.pendingNextM1 && bM1 != LastM1 && TimeCurrent() >= g_M15Signal.expireM1BarTime)
+   {
+      g_M15Signal.pendingNextM1 = false;
    }
 
    // M1 更新判定（指標を取得してグローバルに保存）
