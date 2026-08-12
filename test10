@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.01"
+#property version   "3.02"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -65,7 +65,7 @@ double atrStopLowFactor = 0.5;      // ATR下限ファクター
 double lot_range = 0.7;             // レンジ相場ロット倍率
 double lot_initial_trend = 1.0;     // 通常トレンド初撃ロット倍率
 double lot_strong_pyramid = 0.5;   // 強トレンド追撃ロット倍率
-int pyramid_additional_allowed = 1; // ピラミッディング追加ポジション許可数
+int pyramid_additional_allowed = 1; // 旧仕様・未使用：maxPositionsPyramid - maxPositionsNormal を採用する
 
 // ===================================================================
 // インジケータハンドル（OnInit で作成）
@@ -266,6 +266,16 @@ bool IsIndicatorValueValid(double v)
    return (MathIsValidNumber(v) && v != EMPTY_VALUE && v != 0.0);
 }
 
+bool IsDivergenceValueValid(double v)
+{
+   return (MathIsValidNumber(v) && v != EMPTY_VALUE);
+}
+
+bool HasActualDivergence(DivergenceType type)
+{
+   return (type == DIVERGENCE_BULLISH || type == DIVERGENCE_BEARISH);
+}
+
 void ResetH1Data()
 {
    ArrayInitialize(g_h1_adxArr, EMPTY_VALUE);
@@ -370,7 +380,10 @@ void AddTradeHistoryTimestamp(datetime t)
 void CollectPeakIndices(const double &values[], int count, bool higherIsPeak, int maxPeaks, int &outIdx[])
 {
    ArrayInitialize(outIdx, -1);
+   int temp[32];
    int found = 0;
+   ArrayInitialize(temp, -1);
+
    for (int i = 0; i < count && found < maxPeaks; i++)
    {
       bool isPeak = false;
@@ -386,37 +399,43 @@ void CollectPeakIndices(const double &values[], int count, bool higherIsPeak, in
          bool right = (higherIsPeak ? values[i] >= values[i + 1] : values[i] <= values[i + 1]);
          isPeak = left && right;
       }
-      if (isPeak)
-         outIdx[found++] = i;
+      if (!isPeak)
+         continue;
+
+      if (found > 0 && i - temp[found - 1] <= 1)
+      {
+         temp[found - 1] = i;
+      }
+      else
+      {
+         temp[found++] = i;
+      }
    }
+
+   for (int i = 0; i < found && i < maxPeaks; i++)
+      outIdx[i] = temp[i];
 }
 
 int GetDirectionFromPoints(const double values[], int points)
 {
-   if (points == 3)
-   {
-      double a = values[0];
-      double b = values[1];
-      double c = values[2];
-      if (a < b && b < c)
-         return 1;
-      if (a > b && b > c)
-         return -1;
+   if (points < 3)
       return 0;
-   }
-   if (points == 2)
-   {
-      if (values[0] < values[1])
-         return 1;
-      if (values[0] > values[1])
-         return -1;
-      return 0;
-   }
+
+   double a = values[0];
+   double b = values[1];
+   double c = values[2];
+   if (a < b && b < c)
+      return 1;
+   if (a > b && b > c)
+      return -1;
    return 0;
 }
 
 DivergenceType CheckDivergenceSeries(const double &price[], const double &indicator[], int count, bool useHighs)
 {
+   if (count < 3)
+      return DIVERGENCE_NONE;
+
    int priceIdx[3];
    int indiIdx[3];
    ArrayInitialize(priceIdx, -1);
@@ -433,33 +452,34 @@ DivergenceType CheckDivergenceSeries(const double &price[], const double &indica
       if (indiIdx[i] >= 0)
          indiCount++;
    }
-   if (priceCount < 2 || indiCount < 2)
+   if (priceCount < 3 || indiCount < 3)
       return DIVERGENCE_NONE;
 
    double priceValues[3];
    double indiValues[3];
+   ArrayInitialize(priceValues, 0.0);
+   ArrayInitialize(indiValues, 0.0);
+
    for (int i = 0; i < priceCount; i++)
+   {
+      if (priceIdx[i] < 0 || !IsDivergenceValueValid(price[priceIdx[i]]))
+         return DIVERGENCE_NONE;
       priceValues[i] = price[priceIdx[i]];
+   }
    for (int i = 0; i < indiCount; i++)
+   {
+      if (indiIdx[i] < 0 || !IsDivergenceValueValid(indicator[indiIdx[i]]))
+         return DIVERGENCE_NONE;
       indiValues[i] = indicator[indiIdx[i]];
+   }
 
    int priceDir = GetDirectionFromPoints(priceValues, priceCount);
    int indiDir = GetDirectionFromPoints(indiValues, indiCount);
 
-   if (useHighs)
-   {
-      if (priceDir > 0 && indiDir < 0)
-         return DIVERGENCE_BEARISH;
-      if (priceDir < 0 && indiDir > 0)
-         return DIVERGENCE_BULLISH;
-   }
-   else
-   {
-      if (priceDir < 0 && indiDir > 0)
-         return DIVERGENCE_BULLISH;
-      if (priceDir > 0 && indiDir < 0)
-         return DIVERGENCE_BEARISH;
-   }
+   if (priceDir < 0 && indiDir > 0)
+      return DIVERGENCE_BULLISH;
+   if (priceDir > 0 && indiDir < 0)
+      return DIVERGENCE_BEARISH;
    return DIVERGENCE_NONE;
 }
 
@@ -691,6 +711,8 @@ public:
       ArrayInitialize(priceHigh, 0.0);
       ArrayInitialize(priceLow, 0.0);
       ArrayInitialize(rsiSeries, 0.0);
+
+      // M15 ダイバージェンス対象は bar[1] ～ bar[14] の直近14本の確定足を使用する。
       bool priceOk = CopyHigh(_Symbol, PERIOD_M15, 1, DIVERGENCE_PERIOD, priceHigh) == DIVERGENCE_PERIOD && CopyLow(_Symbol, PERIOD_M15, 1, DIVERGENCE_PERIOD, priceLow) == DIVERGENCE_PERIOD;
       bool rsiOk = CopyBuffer(rsiH, 0, 1, DIVERGENCE_PERIOD, rsiSeries) == DIVERGENCE_PERIOD;
       if (priceOk && rsiOk)
@@ -707,14 +729,17 @@ public:
             highChrono[i] = priceHigh[DIVERGENCE_PERIOD - 1 - i];
             lowChrono[i] = priceLow[DIVERGENCE_PERIOD - 1 - i];
          }
+
          DivergenceType rsiHigh = CheckDivergenceSeries(highChrono, rsiChrono, DIVERGENCE_PERIOD, true);
          DivergenceType rsiLow = CheckDivergenceSeries(lowChrono, rsiChrono, DIVERGENCE_PERIOD, false);
-         if (rsiHigh == DIVERGENCE_BEARISH && rsiLow == DIVERGENCE_BULLISH)
+         if ((rsiHigh == DIVERGENCE_BEARISH && rsiLow == DIVERGENCE_BULLISH) || (rsiHigh == DIVERGENCE_BULLISH && rsiLow == DIVERGENCE_BEARISH))
             m_rsiDiv = DIVERGENCE_CONFLICT;
          else if (rsiHigh != DIVERGENCE_NONE)
             m_rsiDiv = rsiHigh;
-         else
+         else if (rsiLow != DIVERGENCE_NONE)
             m_rsiDiv = rsiLow;
+         else
+            m_rsiDiv = DIVERGENCE_NONE;
       }
       else
       {
@@ -740,23 +765,24 @@ public:
             highChrono[i] = priceHigh[DIVERGENCE_PERIOD - 1 - i];
             lowChrono[i] = priceLow[DIVERGENCE_PERIOD - 1 - i];
          }
+
          DivergenceType macdHigh = CheckDivergenceSeries(highChrono, histChrono, DIVERGENCE_PERIOD, true);
          DivergenceType macdLow = CheckDivergenceSeries(lowChrono, histChrono, DIVERGENCE_PERIOD, false);
-         if (macdHigh == DIVERGENCE_BEARISH && macdLow == DIVERGENCE_BULLISH)
+         if ((macdHigh == DIVERGENCE_BEARISH && macdLow == DIVERGENCE_BULLISH) || (macdHigh == DIVERGENCE_BULLISH && macdLow == DIVERGENCE_BEARISH))
             m_macdDiv = DIVERGENCE_CONFLICT;
          else if (macdHigh != DIVERGENCE_NONE)
             m_macdDiv = macdHigh;
-         else
+         else if (macdLow != DIVERGENCE_NONE)
             m_macdDiv = macdLow;
+         else
+            m_macdDiv = DIVERGENCE_NONE;
       }
       else
       {
          m_macdDiv = DIVERGENCE_NONE;
       }
 
-      if (m_rsiDiv == DIVERGENCE_CONFLICT || m_macdDiv == DIVERGENCE_CONFLICT)
-         m_state = TREND_ACCELERATE;
-      else if (latestMacdHist > 0)
+      if (latestMacdHist > 0)
          m_state = TREND_ACCELERATE;
       else if (latestMacdHist < 0)
          m_state = TREND_DECELERATE;
@@ -768,13 +794,19 @@ public:
       g_M15MacdDivergence = m_macdDiv;
       g_OverheatM15 = m_overheat;
 
-      bool hasSignal = (m_rsiDiv != DIVERGENCE_NONE || m_macdDiv != DIVERGENCE_NONE || m_macdCross);
+      bool hasActualDivergence = HasActualDivergence(m_rsiDiv) || HasActualDivergence(m_macdDiv);
+      bool hasSignal = (hasActualDivergence || m_macdCross);
       if (hasSignal)
       {
          g_M15Signal.barTime = barTime;
          g_M15Signal.expireM1BarTime = iTime(_Symbol, PERIOD_M1, 0) + PeriodSeconds(PERIOD_M1);
-         g_M15Signal.hasDiv = (m_rsiDiv != DIVERGENCE_NONE || m_macdDiv != DIVERGENCE_NONE);
-         g_M15Signal.divType = (m_rsiDiv != DIVERGENCE_NONE) ? m_rsiDiv : m_macdDiv;
+         g_M15Signal.hasDiv = hasActualDivergence;
+         if (HasActualDivergence(m_rsiDiv))
+            g_M15Signal.divType = m_rsiDiv;
+         else if (HasActualDivergence(m_macdDiv))
+            g_M15Signal.divType = m_macdDiv;
+         else
+            g_M15Signal.divType = DIVERGENCE_NONE;
          g_M15Signal.hasMACDCross = m_macdCross;
          g_M15Signal.macdCrossDir = m_macdCrossDir;
          g_M15Signal.pendingNextM1 = true;
