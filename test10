@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.02"
+#property version   "3.03"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -27,8 +27,9 @@ input double MaxLot                = 2.0;   // 最大ロットサイズ（未実
 input double RiskPercentEquity     = 1.0;   // リスク率（%）（未実装：現時点では資金量連動ロット計算に使用していません）
 input int    Max_Positions_Range   = 1;     // レンジ相場での最大ポジション数
 input int    Max_Positions_Trend   = 10;    // トレンド相場での最大ポジション数
-int maxPositionsNormal = 2;
-int maxPositionsPyramid = 5;
+// 以下、仕様確定済みの値（入力パラメータではなく内部定数）
+int maxPositionsNormal = 1;   // 通常時の同一方向最大ポジション数
+int maxPositionsPyramid = 3;  // 追撃を含めた同一方向最大ポジション数（maxPositionsNormal + 追撃可能数2の合計）
 input int    MaxAllowedSpread      = 25;    // 最大許容スプレッド（ポイント）
 input int    SL_Points             = 40;    // ストップロス幅（ポイント）
 input double RiskRewardRatio       = 2.0;   // リスク・リワード比率
@@ -81,8 +82,12 @@ int h_stoch = INVALID_HANDLE;   // ストキャスティクスインジケータ
 int h_atr = INVALID_HANDLE;     // ATRインジケータハンドル
 
 // ===================================================================
-// 1分足の指標値をグローバルで保持（要求）
-// index 0 = 最新確定バー（bar1）
+// 1分足の指標値をグローバルで保持
+// 配列インデックス仕様：
+//   [0] = 最新（現在の未確定足の直前の確定足、ArraySetAsSeries()により降順）
+//   [1] = 1本前の確定足
+//   [2] = 2本前の確定足
+// すべての配列は ArraySetAsSeries(array, true) により降順で管理される
 // ===================================================================
 double g_bbUpper[CACHE_BARS];       // ボリンジャーバンド上限値配列（1分足）
 double g_bbMiddle[CACHE_BARS];      // ボリンジャーバンド中値配列（1分足）
@@ -261,9 +266,14 @@ ulong NowMs()
    return (GetTickCount64());
 }
 
+// ===================================================================
+// IsIndicatorValueValid: 指標値の有効性判定
+// 0値は必ずしも無効値ではありません（MACD Histogram等では正当な0値が存在）
+// したがって、0値チェック（v != 0.0）は除外しています
+// ===================================================================
 bool IsIndicatorValueValid(double v)
 {
-   return (MathIsValidNumber(v) && v != EMPTY_VALUE && v != 0.0);
+   return (MathIsValidNumber(v) && v != EMPTY_VALUE);
 }
 
 bool IsDivergenceValueValid(double v)
@@ -607,8 +617,13 @@ public:
          m_state = STATE_UNKNOWN;
 
       m_value = adxNew;
-      PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f Type=%s State=%s",
-                  adxNew, adxMid, adxOld, dipNew, dimNew, diDiff, emaSNew, emaLNew, TrendTypeToString(m_type), TrendStateToString(m_state));
+      
+      // H1 DI方向と EMA方向をグローバル変数に保存（追撃判定で使用）
+      g_H1DiDir = diDir;
+      g_H1EmaDir = emaDir;
+      
+      PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DiDir=%d EmaDir=%d Type=%s State=%s",
+                  adxNew, adxMid, adxOld, dipNew, dimNew, diDiff, emaSNew, emaLNew, diDir, emaDir, TrendTypeToString(m_type), TrendStateToString(m_state));
       return(true);
    }
    TrendType getType() const { return(m_type); }
