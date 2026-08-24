@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.04"
+#property version   "3.05"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -63,7 +63,7 @@ double atrStopLowFactor = 0.5;      // ATR下限ファクター
 double lot_range = 0.7;             // レンジ相場ロット倍率
 double lot_initial_trend = 1.0;     // 通常トレンド初撃ロット倍率
 double lot_strong_pyramid = 0.5;   // 強トレンド追撃ロット倍率
-int minSLUpdatePoints = 1;          // SL更新の最低差分（point）
+input int MinSLUpdatePoints = 1;    // SL更新の最低差分（point）
 
 // ===================================================================
 // インジケータハンドル（OnInit で作成）
@@ -354,7 +354,7 @@ void RecordRequest(RequestEvaluation evaluation, uint retcode)
    g_requestRecords[index].retcode = retcode;
    int count = ArraySize(g_requestRecords);
    if (count > RequestLimitCount())
-      PrintFormat("取引リクエスト監視：送信失敗=%d 実行失敗=%d 実行成功=%d リクエスト数=%d", RequestEvaluationCount(REQUEST_SEND_FAILED), RequestEvaluationCount(REQUEST_EXECUTION_FAILED), RequestEvaluationCount(REQUEST_EXECUTION_SUCCEEDED), count);
+      PrintFormat("取引リクエスト監視：送信失敗：%d件 / 実行失敗：%d件 / 実行成功：%d件 / リクエスト数：%d件", RequestEvaluationCount(REQUEST_SEND_FAILED), RequestEvaluationCount(REQUEST_EXECUTION_FAILED), RequestEvaluationCount(REQUEST_EXECUTION_SUCCEEDED), count);
 }
 
 void AddTradeHistoryTimestamp(datetime t)
@@ -569,14 +569,13 @@ public:
 
       if (adxNew < adxRangeThreshold)
          m_type = TREND_RANGE;
-      else if (adxNew >= adxStrongThreshold)
+      else if (adxNew >= adxStrongThreshold && diDir == 1 && emaDir == 1)
       {
-         if (diDir == 1)
-            m_type = TREND_STRONG_UP;
-         else if (diDir == -1)
-            m_type = TREND_STRONG_DOWN;
-         else
-            m_type = TREND_UNKNOWN;
+         m_type = TREND_STRONG_UP;
+      }
+      else if (adxNew >= adxStrongThreshold && diDir == -1 && emaDir == -1)
+      {
+         m_type = TREND_STRONG_DOWN;
       }
       else if (adxNew >= adxThreshold)
       {
@@ -596,10 +595,16 @@ public:
             m_state = TREND_ACCELERATE;
          else if (adxOld > adxMid && adxMid > adxNew)
             m_state = TREND_DECELERATE;
+         else if (adxOld > adxMid && adxMid < adxNew && adxOld < adxNew)
+            m_state = TREND_REACCELERATE;
+         else if (adxOld > adxMid && adxMid < adxNew && adxOld >= adxNew)
+            m_state = TREND_RECOVERY_MAINTAIN;
+         else if (adxOld < adxMid && adxMid > adxNew)
+            m_state = TREND_STALL_MAINTAIN;
          else
             m_state = TREND_MAINTAIN;
       }
-      else if (adxOld < 25 && adxMid < 25 && adxNew >= 25)
+      else if (adxOld < adxThreshold && adxMid < adxThreshold && adxNew >= adxThreshold)
          m_state = RANGE_TO_TREND;
       else if (adxOld >= 18 && adxMid >= 18 && adxNew < 18)
          m_state = TREND_TO_RANGE;
@@ -1159,6 +1164,38 @@ bool ClosePositionByTicket(ulong ticket)
    return (true);
 }
 
+bool IsPyramidAllowedByM15(bool isBuy)
+{
+   if (!g_m15AllOk || !g_m15_rsi_ok || ArraySize(g_m15_rsiArr) == 0)
+      return false;
+
+   double rsi = g_m15_rsiArr[0];
+   if (!IsIndicatorValueValid(rsi))
+      return false;
+   if (isBuy && rsi < rsiOverbought)
+      return false;
+   if (!isBuy && rsi > rsiOversold)
+      return false;
+   if (!g_M15Signal.pendingNextM1)
+      return true;
+
+   if (isBuy)
+   {
+      if (g_M15Signal.hasDiv && g_M15Signal.divType == DIVERGENCE_BEARISH)
+         return false;
+      if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir < 0)
+         return false;
+   }
+   else
+   {
+      if (g_M15Signal.hasDiv && g_M15Signal.divType == DIVERGENCE_BULLISH)
+         return false;
+      if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir > 0)
+         return false;
+   }
+   return true;
+}
+
 // ===================================================================
 // ポジションの逆指値更新の補助関数
 // ===================================================================
@@ -1185,7 +1222,14 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
 
 void UpdateTrailingStops()
 {
-   if (!g_h1AllOk || !g_m1AllOk || g_TrendTypeH == TREND_RANGE || g_TrendTypeH == TREND_UNKNOWN || !IsIndicatorValueValid(g_superTrend[0]))
+   double buyNewSL = 0.0;
+   double sellNewSL = 0.0;
+   if (g_h1AllOk && g_m1AllOk && g_TrendTypeH != TREND_RANGE && g_TrendTypeH != TREND_UNKNOWN && IsIndicatorValueValid(g_superTrend[0]))
+   {
+      buyNewSL = g_superTrend[0];
+      sellNewSL = g_superTrend[0];
+   }
+   if (buyNewSL <= 0.0 && sellNewSL <= 0.0)
       return;
    for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -1194,11 +1238,10 @@ void UpdateTrailingStops()
          continue;
       long ptype = PositionGetInteger(POSITION_TYPE);
       double currentSL = PositionGetDouble(POSITION_SL);
-      double newSL = g_superTrend[0];
-      if (ptype == POSITION_TYPE_BUY && g_superTrendDir[0] > 0 && newSL > currentSL && newSL - currentSL >= minSLUpdatePoints * _Point)
-         ModifyPositionSLTP(ticket, newSL, PositionGetDouble(POSITION_TP));
-      else if (ptype == POSITION_TYPE_SELL && g_superTrendDir[0] < 0 && (currentSL == 0.0 || newSL < currentSL) && (currentSL == 0.0 || currentSL - newSL >= minSLUpdatePoints * _Point))
-         ModifyPositionSLTP(ticket, newSL, PositionGetDouble(POSITION_TP));
+      if (ptype == POSITION_TYPE_BUY && g_superTrendDir[0] > 0 && buyNewSL > currentSL && buyNewSL - currentSL >= MinSLUpdatePoints * _Point)
+         ModifyPositionSLTP(ticket, buyNewSL, PositionGetDouble(POSITION_TP));
+      else if (ptype == POSITION_TYPE_SELL && g_superTrendDir[0] < 0 && (currentSL == 0.0 || sellNewSL < currentSL) && (currentSL == 0.0 || currentSL - sellNewSL >= MinSLUpdatePoints * _Point))
+         ModifyPositionSLTP(ticket, sellNewSL, PositionGetDouble(POSITION_TP));
    }
 }
 
@@ -1415,6 +1458,9 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
    if (g_TrendTypeH == TREND_STRONG_DOWN && !isBuy && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendReaccelSell && sameDirCount > 0)
       allowPyramid = true;
 
+   if (allowPyramid && !IsPyramidAllowedByM15(isBuy))
+      return;
+
    if (!allowPyramid && sameDirCount >= maxPositionsNormal)
       return;
    if (allowPyramid && sameDirCount >= maxPositionsPyramid)
@@ -1486,7 +1532,6 @@ void OnTick()
    double ASK = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double BID = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double spreadPts = (ASK - BID) / _Point;
-   PrintFormat("OnTick: ASK=%.5f BID=%.5f スプレッド(pips)=%.1f", ASK, BID, spreadPts);
 
    if (ASK <= 0 || BID <= 0)
    {
