@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.05"
+#property version   "3.07"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -173,6 +173,8 @@ bool g_superTrendPullbackBuy = false;
 bool g_superTrendPullbackSell = false;
 bool g_superTrendReaccelBuy = false;
 bool g_superTrendReaccelSell = false;
+bool g_superTrendFlipBuy = false;
+bool g_superTrendFlipSell = false;
 
 // ===================================================================
 // 価格変数とフラグ変数の分離
@@ -379,11 +381,10 @@ void AddTradeHistoryTimestamp(datetime t)
 void CollectPeakIndices(const double &values[], int count, bool higherIsPeak, int maxPeaks, int &outIdx[])
 {
    ArrayInitialize(outIdx, -1);
-   int temp[32];
-   int found = 0;
-   ArrayInitialize(temp, -1);
+   bool candidates[32];
+   ArrayInitialize(candidates, false);
 
-   for (int i = 0; i < count && found < maxPeaks; i++)
+   for (int i = 0; i < count && i < 32; i++)
    {
       bool isPeak = false;
       if (count == 1)
@@ -400,19 +401,40 @@ void CollectPeakIndices(const double &values[], int count, bool higherIsPeak, in
       }
       if (!isPeak)
          continue;
-
-      if (found > 0 && i - temp[found - 1] <= 1)
-      {
-         temp[found - 1] = i;
-      }
-      else
-      {
-         temp[found++] = i;
-      }
+      candidates[i] = true;
    }
 
-   for (int i = 0; i < found && i < maxPeaks; i++)
-      outIdx[i] = temp[i];
+   // 隣接候補は直近側を残す。
+   for (int i = 0; i + 1 < count && i + 1 < 32; i++)
+      if (candidates[i] && candidates[i + 1])
+         candidates[i] = false;
+
+   int selected = 0;
+   while (selected < maxPeaks)
+   {
+      int best = -1;
+      for (int i = 0; i < count && i < 32; i++)
+      {
+         if (!candidates[i])
+            continue;
+         if (best < 0 || (higherIsPeak && values[i] > values[best]) || (!higherIsPeak && values[i] < values[best]) ||
+             (values[i] == values[best] && i > best))
+            best = i;
+      }
+      if (best < 0)
+         break;
+      outIdx[selected++] = best;
+      candidates[best] = false;
+   }
+
+   for (int i = 0; i < selected - 1; i++)
+      for (int j = i + 1; j < selected; j++)
+         if (outIdx[i] > outIdx[j])
+         {
+            int temp = outIdx[i];
+            outIdx[i] = outIdx[j];
+            outIdx[j] = temp;
+         }
 }
 
 int GetDirectionFromPoints(const double values[], int points)
@@ -569,11 +591,11 @@ public:
 
       if (adxNew < adxRangeThreshold)
          m_type = TREND_RANGE;
-      else if (adxNew >= adxStrongThreshold && diDir == 1 && emaDir == 1)
+      else if (adxNew >= adxStrongThreshold && diDir == 1)
       {
          m_type = TREND_STRONG_UP;
       }
-      else if (adxNew >= adxStrongThreshold && diDir == -1 && emaDir == -1)
+      else if (adxNew >= adxStrongThreshold && diDir == -1)
       {
          m_type = TREND_STRONG_DOWN;
       }
@@ -931,6 +953,8 @@ public:
       double lowerBand = hl2 - atrMultiplierSL * atrBuffer[2];
       double trendValue = g_superTrend[1];
       int prevDir = (g_superTrendDir[1] > 0) ? 1 : ((g_superTrendDir[1] < 0) ? -1 : 0);
+      g_superTrendFlipBuy = false;
+      g_superTrendFlipSell = false;
       if (!IsIndicatorValueValid(trendValue))
       {
          g_superTrend[0] = hl2;
@@ -952,6 +976,8 @@ public:
          g_superTrend[0] = (currClose >= hl2) ? lowerBand : upperBand;
          g_superTrendDir[0] = (currClose >= hl2) ? 1 : -1;
       }
+      g_superTrendFlipBuy = prevDir < 0 && g_superTrendDir[0] > 0;
+      g_superTrendFlipSell = prevDir > 0 && g_superTrendDir[0] < 0;
       return true;
    }
 
@@ -965,8 +991,6 @@ public:
       g_canEntrySell = false;
       g_canCloseBuy = false;
       g_canCloseSell = false;
-      g_entryThresholdCrossedBuy = false;
-      g_entryThresholdCrossedSell = false;
       g_closeThresholdCrossedBuy = false;
       g_closeThresholdCrossedSell = false;
       g_M15LotMultiplier = 1.0;
@@ -994,6 +1018,10 @@ public:
             if (g_superTrendReaccelSell)
                g_superTrendPullbackSell = false;
          }
+         if (g_superTrendDir[0] <= 0)
+            g_superTrendPullbackBuy = false;
+         if (g_superTrendDir[0] >= 0)
+            g_superTrendPullbackSell = false;
       }
 
       if (h1Type == TREND_RANGE)
@@ -1006,6 +1034,12 @@ public:
          g_entrySellOnOrAbove = true;
          g_closeBuyOnOrAbove = false;
          g_closeSellOnOrBelow = false;
+         if (iClose(_Symbol, PERIOD_M1, 1) <= g_bbLower[0])
+            g_entryThresholdCrossedBuy = true;
+         if (iClose(_Symbol, PERIOD_M1, 1) >= g_bbUpper[0])
+            g_entryThresholdCrossedSell = true;
+         g_entryBuyOnOrBelow = false;
+         g_entrySellOnOrAbove = false;
       }
       else if (h1Type == TREND_UNKNOWN)
       {
@@ -1020,6 +1054,8 @@ public:
       }
       else
       {
+         g_entryThresholdCrossedBuy = false;
+         g_entryThresholdCrossedSell = false;
          g_entryPriceBuy = g_superTrend[0];
          g_entryPriceSell = g_superTrend[0];
          g_closePriceBuy = g_superTrend[0];
@@ -1028,6 +1064,8 @@ public:
          g_entrySellOnOrAbove = false;
          g_closeBuyOnOrAbove = false;
          g_closeSellOnOrBelow = false;
+         g_canEntryBuy = g_superTrendFlipBuy || g_superTrendReaccelBuy || g_TrendStateH == RANGE_TO_TREND;
+         g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
       }
 
       if (g_stochK[0] > g_stochD[0] && g_stochK[0] > stochOverbought)
@@ -1046,10 +1084,15 @@ public:
          g_closeSellOnOrBelow = false;
       }
 
-      if (g_entryPriceBuy > 0.0)
-         g_canEntryBuy = true;
-      if (g_entryPriceSell > 0.0)
-         g_canEntrySell = true;
+      if (g_entryPriceBuy <= 0.0)
+         g_canEntryBuy = false;
+      if (g_entryPriceSell <= 0.0)
+         g_canEntrySell = false;
+      if (h1Type == TREND_RANGE)
+      {
+         g_canEntryBuy = g_entryPriceBuy > 0.0;
+         g_canEntrySell = g_entryPriceSell > 0.0;
+      }
       if (g_closePriceBuy > 0.0)
          g_canCloseBuy = true;
       if (g_closePriceSell > 0.0)
@@ -1181,14 +1224,18 @@ bool IsPyramidAllowedByM15(bool isBuy)
 
    if (isBuy)
    {
-      if (g_M15Signal.hasDiv && g_M15Signal.divType == DIVERGENCE_BEARISH)
+      bool hasBearish = g_M15RsiDivergence == DIVERGENCE_BEARISH || g_M15MacdDivergence == DIVERGENCE_BEARISH;
+      bool hasBullish = g_M15RsiDivergence == DIVERGENCE_BULLISH || g_M15MacdDivergence == DIVERGENCE_BULLISH;
+      if (g_M15Signal.hasDiv && hasBearish && !hasBullish)
          return false;
       if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir < 0)
          return false;
    }
    else
    {
-      if (g_M15Signal.hasDiv && g_M15Signal.divType == DIVERGENCE_BULLISH)
+      bool hasBearish = g_M15RsiDivergence == DIVERGENCE_BEARISH || g_M15MacdDivergence == DIVERGENCE_BEARISH;
+      bool hasBullish = g_M15RsiDivergence == DIVERGENCE_BULLISH || g_M15MacdDivergence == DIVERGENCE_BULLISH;
+      if (g_M15Signal.hasDiv && hasBullish && !hasBearish)
          return false;
       if (g_M15Signal.hasMACDCross && g_M15Signal.macdCrossDir > 0)
          return false;
@@ -1399,7 +1446,8 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
       return;
 
    bool isBuy = (posType == POSITION_TYPE_BUY);
-   bool condition = isBuy ? (currentPrice >= closePrice) : (currentPrice <= closePrice);
+   bool condition = isBuy ? (g_closeBuyOnOrAbove ? currentPrice >= closePrice : currentPrice <= closePrice)
+                          : (g_closeSellOnOrBelow ? currentPrice <= closePrice : currentPrice >= closePrice);
    if (!condition)
       return;
 
@@ -1473,8 +1521,8 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
 
    if (g_TrendTypeH == TREND_RANGE)
    {
-      bool rangeBuyOk = g_m15_rsi_ok && g_m1_bb_ok && g_m15_rsiArr[0] <= rsiOversold && ask <= g_bbLower[0];
-      bool rangeSellOk = g_m15_rsi_ok && g_m1_bb_ok && g_m15_rsiArr[0] >= rsiOverbought && bid >= g_bbUpper[0];
+      bool rangeBuyOk = g_m15_rsi_ok && g_m1_bb_ok && g_m15_rsiArr[0] <= rsiOversold && g_entryThresholdCrossedBuy && ask >= entryPrice;
+      bool rangeSellOk = g_m15_rsi_ok && g_m1_bb_ok && g_m15_rsiArr[0] >= rsiOverbought && g_entryThresholdCrossedSell && bid <= entryPrice;
       if (isBuy && !rangeBuyOk) return;
       if (!isBuy && !rangeSellOk) return;
    }
@@ -1516,9 +1564,15 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       if (SendMarketOrder(orderType, lot, sl, tp, false))
       {
          if (isBuy)
+         {
             g_lastBuyEntryBarTime = LastM1;
+            g_entryThresholdCrossedBuy = false;
+         }
          else
+         {
             g_lastSellEntryBarTime = LastM1;
+            g_entryThresholdCrossedSell = false;
+         }
          PrintFormat("OnTick: 条件達成により %s を発注しました。Lot=%.2f SL=%.5f TP=%.5f", isBuy ? "BUY" : "SELL", lot, sl, tp);
       }
    }
@@ -1732,7 +1786,9 @@ void OnTimer()
     datetime bM15 = iTime(_Symbol, PERIOD_M15, 0);
     datetime bM1 = iTime(_Symbol, PERIOD_M1, 0);
 
-    // H1 更新判定
+   bool newM1Bar = bM1 != LastM1;
+
+   // H1 更新判定
     if (bH1 != LastH1)
     {
         ResetH1Data();
@@ -1768,14 +1824,8 @@ void OnTimer()
       }
    }
 
-   // M15 シグナルの有効期限管理
-   if (g_M15Signal.pendingNextM1 && bM1 != LastM1 && TimeCurrent() >= g_M15Signal.expireM1BarTime)
-   {
-      g_M15Signal.pendingNextM1 = false;
-   }
-
    // M1 更新判定（指標を取得してグローバルに保存）
-   if (bM1 != LastM1)
+   if (newM1Bar)
    {
       ResetM1Data();
       if (TrendM1.Calculate())
@@ -1790,4 +1840,9 @@ void OnTimer()
          PrintFormat("OnTimer: 1分足更新ができなかった 時刻=%s", TimeToString(bM1, TIME_DATE | TIME_SECONDS));
       }
    }
+
+   // M15シグナルは、M15確定後に最初に処理したM1足でのみ有効とする。
+   // M1判定が完了した後に失効させ、同じ足の追撃判定では利用できるようにする。
+   if (newM1Bar && g_M15Signal.pendingNextM1 && bM1 >= g_M15Signal.expireM1BarTime)
+      g_M15Signal.pendingNextM1 = false;
 }
