@@ -24,15 +24,17 @@ input long   MagicNumber           = 3625;  // トレードの識別番号
 input double BaseLot               = 1.0;   // 基本ロットサイズ
 input double MaxLot                = 2.0;   // 最大ロットサイズ（未実装：現時点では固定ロット方式を使用しており、資金連動ロット計算は使用していません）
 input double RiskPercentEquity     = 1.0;   // リスク率（%）（未実装：現時点では資金量連動ロット計算に使用していません）
-// 以下、仕様確定済みの値（入力パラメータではなく内部定数）
-int maxPositionsNormal = 1;   // 通常時の同一方向最大ポジション数
-int maxPositionsPyramid = 3;  // 追撃を含めた同一方向の最終最大ポジション数
 input int    MaxAllowedSpread      = 25;    // 最大許容スプレッド（ポイント）
 input int    SL_Points             = 40;    // ストップロス幅（ポイント）
+input int MinSLUpdatePoints        = 1;     // SL更新の最低差分（ポイント）
 input double RiskRewardRatio       = 2.0;   // リスク・リワード比率
+
 // ===================================================================
 // 内部パラメータ（input にはしない）
 // ===================================================================
+int maxPositionsNormal = 1;         // 通常時の同一方向最大ポジション数
+int maxPositionsPyramid = 3;        // 追撃を含めた同一方向の最終最大ポジション数
+
 int adxPeriod = 14;                 // ADX周期
 int adxThreshold = 25;              // ADX弱トレンド判定閾値
 int adxStrongThreshold = 40;        // ADX強トレンド判定閾値
@@ -55,15 +57,14 @@ int stochOverbought = 80, stochOversold = 20;  // ストキャスティクス閾
 int atrPeriod = 14;                 // ATR周期
 double superTrendAtrFactor = 3.0;   // SuperTrendライン計算用ATR倍率（内部変数）
 double pullbackAtrFactor = 0.3;     // Pullback判定幅のATR倍率（内部変数）
-double reaccelAtrFactor = 0.2;     // Reacceleration判定幅のATR倍率（内部変数）
+double reaccelAtrFactor = 0.2;      // Reacceleration判定幅のATR倍率（内部変数）
 double atrMultiplierSL = 1.5;       // ストップロス用ATR倍率
 double atrMultiplierTrail = 1.5;    // トレーリング用ATR倍率
 double atrStopLowFactor = 0.5;      // ATR下限ファクター
 
 double lot_range = 0.7;             // レンジ相場ロット倍率
 double lot_initial_trend = 1.0;     // 通常トレンド初撃ロット倍率
-double lot_strong_pyramid = 0.5;   // 強トレンド追撃ロット倍率
-input int MinSLUpdatePoints = 1;    // SL更新の最低差分（point）
+double lot_strong_pyramid = 0.5;    // 強トレンド追撃ロット倍率
 
 // ===================================================================
 // インジケータハンドル（OnInit で作成）
