@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.10"
+#property version   "3.11"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -176,6 +176,8 @@ bool g_superTrendReaccelBuy = false;
 bool g_superTrendReaccelSell = false;
 bool g_superTrendFlipBuy = false;
 bool g_superTrendFlipSell = false;
+double g_previousAsk = 0.0;
+double g_previousBid = 0.0;
 
 // ===================================================================
 // 価格変数とフラグ変数の分離
@@ -865,6 +867,13 @@ public:
    void Init(int _h_bb, int _h_stoch, int _h_atr) { h_bb = _h_bb; h_stoch = _h_stoch; h_atr = _h_atr; }
    bool Calculate()
    {
+      g_superTrendPullbackBuy = false;
+      g_superTrendPullbackSell = false;
+      g_superTrendReaccelBuy = false;
+      g_superTrendReaccelSell = false;
+      g_previousAsk = 0.0;
+      g_previousBid = 0.0;
+
       datetime lastBar = iTime(_Symbol, PERIOD_M1, 0);
       if (lastBar <= 0)
          return(false);
@@ -1161,30 +1170,31 @@ public:
    {
       g_superTrendReaccelBuy = false;
       g_superTrendReaccelSell = false;
-      if (!g_m1AllOk || !g_superTrendInitialized || g_TrendTypeH == TREND_RANGE || g_TrendTypeH == TREND_UNKNOWN)
-         return;
-      if (g_superTrendDir[1] > 0)
+
+      bool hasPreviousPrice = g_previousAsk > 0.0 && g_previousBid > 0.0;
+      if (hasPreviousPrice && g_m1AllOk && g_superTrendInitialized && g_TrendTypeH != TREND_RANGE && g_TrendTypeH != TREND_UNKNOWN)
       {
-         if (ask <= g_pullbackThresholdBuy)
-            g_superTrendPullbackBuy = true;
-         if (g_superTrendPullbackBuy && ask > g_reaccelThresholdBuy)
+         if (g_superTrendDir[1] > 0)
          {
-            g_superTrendReaccelBuy = true;
-            g_superTrendPullbackBuy = false;
-         }
-         g_superTrendPullbackSell = false;
-      }
-      else if (g_superTrendDir[1] < 0)
-      {
-         if (bid >= g_pullbackThresholdSell)
-            g_superTrendPullbackSell = true;
-         if (g_superTrendPullbackSell && bid < g_reaccelThresholdSell)
-         {
-            g_superTrendReaccelSell = true;
+            if (g_previousAsk > g_pullbackThresholdBuy && ask <= g_pullbackThresholdBuy)
+               g_superTrendPullbackBuy = true;
+            if (g_superTrendPullbackBuy && g_previousAsk < g_reaccelThresholdBuy && ask >= g_reaccelThresholdBuy)
+               g_superTrendReaccelBuy = true;
             g_superTrendPullbackSell = false;
          }
-         g_superTrendPullbackBuy = false;
+         else if (g_superTrendDir[1] < 0)
+         {
+            if (g_previousBid < g_pullbackThresholdSell && bid >= g_pullbackThresholdSell)
+               g_superTrendPullbackSell = true;
+            if (g_superTrendPullbackSell && g_previousBid > g_reaccelThresholdSell && bid <= g_reaccelThresholdSell)
+               g_superTrendReaccelSell = true;
+            g_superTrendPullbackBuy = false;
+         }
       }
+
+      g_previousAsk = ask;
+      g_previousBid = bid;
+
       g_canEntryBuy = g_superTrendFlipBuy || g_superTrendReaccelBuy || g_TrendStateH == RANGE_TO_TREND;
       g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
    }
@@ -1612,11 +1622,15 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
          {
             g_lastBuyEntryBarTime = LastM1;
             g_entryThresholdCrossedBuy = false;
+            if (allowPyramid)
+               g_superTrendPullbackBuy = false;
          }
          else
          {
             g_lastSellEntryBarTime = LastM1;
             g_entryThresholdCrossedSell = false;
+            if (allowPyramid)
+               g_superTrendPullbackSell = false;
          }
          PrintFormat("OnTick: 条件達成により %s を発注しました。Lot=%.2f SL=%.5f TP=%.5f", isBuy ? "BUY" : "SELL", lot, sl, tp);
       }
@@ -1847,13 +1861,16 @@ void OnTimer()
 
    bool newM1Bar = bM1 != LastM1;
 
+   // SuperTrend初期化確認
+   if (!g_superTrendInitialized && !TrendM1.InitializeSuperTrend())
+      Print("OnTimer: SuperTrend初期化失敗。次回のM1更新で再試行します。");
+
    // M1 更新判定
    if (newM1Bar)
    {
       ResetM1Data();
       if (TrendM1.Calculate())
       {
-         TrendM1.ComputeEntryExit(g_TrendTypeH);
          LastM1 = bM1;
          PrintFormat("OnTimer: 1分足更新ができた 時刻=%s", TimeToString(bM1, TIME_DATE | TIME_SECONDS));
       }
@@ -1899,6 +1916,10 @@ void OnTimer()
          PrintFormat("OnTimer: 1時間足更新ができなかった 時刻=%s", TimeToString(bH1, TIME_DATE | TIME_SECONDS));
       }
    }
+
+   // M1売買条件統合判定は、M15/H1更新後に実行する。
+   if (newM1Bar)
+      TrendM1.ComputeEntryExit(g_TrendTypeH);
 
    // M15シグナルは、M15確定後に最初に処理したM1足でのみ有効とする。
    // M1判定が完了した後に失効させ、同じ足の追撃判定では利用できるようにする。
