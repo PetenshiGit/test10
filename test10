@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.12"
+#property version   "3.13"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -907,12 +907,10 @@ public:
          return false;
       }
 
+      // 新M1足のPullback/Reacceleration状態はここでリセットする。
+      // Tick間の前回ASK/BIDはOnTick側で継続管理するため、ここではクリアしない。
       g_superTrendPullbackBuy = false;
       g_superTrendPullbackSell = false;
-      g_superTrendReaccelBuy = false;
-      g_superTrendReaccelSell = false;
-      g_previousAsk = 0.0;
-      g_previousBid = 0.0;
 
       PrintFormat("M1確定値 ATR=%.5f BB上=%.5f BB中=%.5f BB下=%.5f StochK=%.3f StochD=%.3f", g_atr[1], g_bbUpper[1], g_bbMiddle[1], g_bbLower[1], g_stochK[1], g_stochD[1]);
       PrintFormat("M1 SuperTrend更新値=%.5f 方向=%d", g_superTrend[1], g_superTrendDir[1]);
@@ -959,7 +957,17 @@ public:
          {
             finalUpperValues[index] = basicUpper;
             finalLowerValues[index] = basicLower;
-            directions[index] = (close >= median) ? 1 : -1;
+            if (close > finalLowerValues[index])
+               directions[index] = 1;
+            else if (close < finalUpperValues[index])
+               directions[index] = -1;
+            else
+               if (close > finalLowerValues[index])
+               directions[index] = 1;
+            else if (close < finalUpperValues[index])
+               directions[index] = -1;
+            else
+               directions[index] = (close >= median) ? 1 : -1;
             stValues[index] = (directions[index] > 0) ? finalLowerValues[index] : finalUpperValues[index];
             continue;
          }
@@ -1007,28 +1015,60 @@ public:
 
       int previousDir = g_superTrendLastDir;
       double previousValue = g_superTrendLast;
-      double median = (high + low) / 2.0;
-      double basicUpper = median + superTrendAtrFactor * atrValue;
-      double basicLower = median - superTrendAtrFactor * atrValue;
-      double finalUpper = (basicUpper < g_superTrendFinalUpper || prevClose > g_superTrendFinalUpper) ? basicUpper : g_superTrendFinalUpper;
-      double finalLower = (basicLower > g_superTrendFinalLower || prevClose < g_superTrendFinalLower) ? basicLower : g_superTrendFinalLower;
-
-      int newDir = previousDir;
-      double newValue = previousValue;
-      if (close > finalLower)
+      doubpreviousDir > 0)
       {
-         newDir = 1;
-         newValue = finalLower;
+         if (close < finalLower)
+         {
+            newDir = -1;
+            newValue = finalUpper;
+         }
+         else
+         {
+            newDir = 1;
+            newValue = finalLower;
+         }
       }
-      else if (close < finalUpper)
+      else if (previousDir < 0)
       {
-         newDir = -1;
-         newValue = finalUpper;
+         if (close > finalUpper)
+         {
+            newDir = 1;
+            newValue = finalLower;
+         }
+         else
+         {
+            newDir = -1;
+            newValue = finalUpper;
+         }
       }
       else
       {
-         newDir = previousDir;
-         newValue = (previousDir > 0) ? finalLower : finalUpper;
+         newDir = (close > finalLower) ? 1 : -1;
+         newValue = (newpper;
+         }
+         else
+         {
+            newDir = 1;
+            newValue = finalLower;
+         }
+      }
+      else if (previousDir < 0)
+      {
+         if (close > finalUpper)
+         {
+            newDir = 1;
+            newValue = finalLower;
+         }
+         else
+         {
+            newDir = -1;
+            newValue = finalUpper;
+         }
+      }
+      else
+      {
+         newDir = (close > finalLower) ? 1 : -1;
+         newValue = (newDir > 0) ? finalLower : finalUpper;
       }
 
       g_superTrendFinalUpper = finalUpper;
@@ -1863,6 +1903,10 @@ void OnTimer()
    // M1 更新判定
    if (newM1Bar)
    {
+      g_superTrendPullbackBuy = false;
+      g_superTrendPullbackSell = false;
+      g_superTrendReaccelBuy = false;
+      g_superTrendReaccelSell = false;
       ResetM1Data();
       if (TrendM1.Calculate())
       {
