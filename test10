@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.14"
+#property version   "3.15"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -279,18 +279,28 @@ bool AreIndicatorValuesValid(const double &values[])
    return ArraySize(values) == INDICATOR_BARS;
 }
 
+bool ArePriceValuesValid(const double &values[])
+{
+   if (ArraySize(values) != INDICATOR_BARS)
+      return(false);
+   for (int i = 0; i < INDICATOR_BARS; i++)
+      if (!IsIndicatorValueValid(values[i]))
+         return(false);
+   return(true);
+}
+
 bool CopyBufferWithRetry(int handle, int buffer, double &values[])
 {
-   ArrayResize(values, INDICATOR_BARS);
    ArraySetAsSeries(values, true);
    for (int attempt = 0; attempt < 3; attempt++)
    {
-      if (CopyBuffer(handle, buffer, 0, INDICATOR_BARS, values) == INDICATOR_BARS)
-         return true;
+      if (CopyBuffer(handle, buffer, 0, INDICATOR_BARS, values) == INDICATOR_BARS &&
+          AreIndicatorValuesValid(values))
+         return(true);
       if (attempt < 2)
          Sleep(100);
    }
-   return false;
+   return(false);
 }
 
 void LogArrayCopyVerification(const string name, const double &local[], const double &global[])
@@ -312,11 +322,11 @@ bool HasActualDivergence(DivergenceType type)
 
 void ResetH1Data()
 {
-   ArrayResize(g_h1_adxArr, INDICATOR_BARS); ArraySetAsSeries(g_h1_adxArr, true);
-   ArrayResize(g_h1_dipArr, INDICATOR_BARS); ArraySetAsSeries(g_h1_dipArr, true);
-   ArrayResize(g_h1_dimArr, INDICATOR_BARS); ArraySetAsSeries(g_h1_dimArr, true);
-   ArrayResize(g_h1_emaSArr, INDICATOR_BARS); ArraySetAsSeries(g_h1_emaSArr, true);
-   ArrayResize(g_h1_emaLArr, INDICATOR_BARS); ArraySetAsSeries(g_h1_emaLArr, true);
+   ArraySetAsSeries(g_h1_adxArr, true);
+   ArraySetAsSeries(g_h1_dipArr, true);
+   ArraySetAsSeries(g_h1_dimArr, true);
+   ArraySetAsSeries(g_h1_emaSArr, true);
+   ArraySetAsSeries(g_h1_emaLArr, true);
    ArrayInitialize(g_h1_adxArr, EMPTY_VALUE);
    ArrayInitialize(g_h1_dipArr, EMPTY_VALUE);
    ArrayInitialize(g_h1_dimArr, EMPTY_VALUE);
@@ -328,9 +338,9 @@ void ResetH1Data()
 
 void ResetM15Data()
 {
-   ArrayResize(g_m15_rsiArr, INDICATOR_BARS); ArraySetAsSeries(g_m15_rsiArr, true);
-   ArrayResize(g_m15_macdMainAll, INDICATOR_BARS); ArraySetAsSeries(g_m15_macdMainAll, true);
-   ArrayResize(g_m15_macdSigAll, INDICATOR_BARS); ArraySetAsSeries(g_m15_macdSigAll, true);
+   ArraySetAsSeries(g_m15_rsiArr, true);
+   ArraySetAsSeries(g_m15_macdMainAll, true);
+   ArraySetAsSeries(g_m15_macdSigAll, true);
    ArrayInitialize(g_m15_rsiArr, EMPTY_VALUE);
    ArrayInitialize(g_m15_macdMainAll, EMPTY_VALUE);
    ArrayInitialize(g_m15_macdSigAll, EMPTY_VALUE);
@@ -340,15 +350,15 @@ void ResetM15Data()
 
 void ResetM1Data()
 {
-   ArrayResize(g_bbUpper, INDICATOR_BARS); ArraySetAsSeries(g_bbUpper, true);
-   ArrayResize(g_bbMiddle, INDICATOR_BARS); ArraySetAsSeries(g_bbMiddle, true);
-   ArrayResize(g_bbLower, INDICATOR_BARS); ArraySetAsSeries(g_bbLower, true);
-   ArrayResize(g_stochK, INDICATOR_BARS); ArraySetAsSeries(g_stochK, true);
-   ArrayResize(g_stochD, INDICATOR_BARS); ArraySetAsSeries(g_stochD, true);
-   ArrayResize(g_atr, INDICATOR_BARS); ArraySetAsSeries(g_atr, true);
-   ArrayResize(g_m1High, INDICATOR_BARS); ArraySetAsSeries(g_m1High, true);
-   ArrayResize(g_m1Low, INDICATOR_BARS); ArraySetAsSeries(g_m1Low, true);
-   ArrayResize(g_m1Close, INDICATOR_BARS); ArraySetAsSeries(g_m1Close, true);
+   ArraySetAsSeries(g_bbUpper, true);
+   ArraySetAsSeries(g_bbMiddle, true);
+   ArraySetAsSeries(g_bbLower, true);
+   ArraySetAsSeries(g_stochK, true);
+   ArraySetAsSeries(g_stochD, true);
+   ArraySetAsSeries(g_atr, true);
+   ArraySetAsSeries(g_m1High, true);
+   ArraySetAsSeries(g_m1Low, true);
+   ArraySetAsSeries(g_m1Close, true);
    ArrayInitialize(g_bbUpper, EMPTY_VALUE);
    ArrayInitialize(g_bbMiddle, EMPTY_VALUE);
    ArrayInitialize(g_bbLower, EMPTY_VALUE);
@@ -632,28 +642,28 @@ public:
       double adxH1[], diPlusH1[], diMinusH1[], emaShortH1[], emaLongH1[];
       if (!g_h1_adx_ok)
       {
-         g_h1_adx_ok = CopyBufferWithRetry(h_adx, 0, adxH1) && AreIndicatorValuesValid(adxH1);
-         if (g_h1_adx_ok) { ArrayCopy(g_h1_adxArr, adxH1); ArraySetAsSeries(g_h1_adxArr, true); LogArrayCopyVerification("H1 ADX", adxH1, g_h1_adxArr); }
+         g_h1_adx_ok = CopyBufferWithRetry(h_adx, 0, adxH1);
+         if (g_h1_adx_ok) { g_h1_adx_ok = (ArrayCopy(g_h1_adxArr, adxH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_adxArr, true); if (g_h1_adx_ok) LogArrayCopyVerification("H1 ADX", adxH1, g_h1_adxArr); }
       }
       if (!g_h1_dip_ok)
       {
-         g_h1_dip_ok = CopyBufferWithRetry(h_adx, 1, diPlusH1) && AreIndicatorValuesValid(diPlusH1);
-         if (g_h1_dip_ok) { ArrayCopy(g_h1_dipArr, diPlusH1); ArraySetAsSeries(g_h1_dipArr, true); LogArrayCopyVerification("H1 DI+", diPlusH1, g_h1_dipArr); }
+         g_h1_dip_ok = CopyBufferWithRetry(h_adx, 1, diPlusH1);
+         if (g_h1_dip_ok) { g_h1_dip_ok = (ArrayCopy(g_h1_dipArr, diPlusH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_dipArr, true); if (g_h1_dip_ok) LogArrayCopyVerification("H1 DI+", diPlusH1, g_h1_dipArr); }
       }
       if (!g_h1_dim_ok)
       {
-         g_h1_dim_ok = CopyBufferWithRetry(h_adx, 2, diMinusH1) && AreIndicatorValuesValid(diMinusH1);
-         if (g_h1_dim_ok) { ArrayCopy(g_h1_dimArr, diMinusH1); ArraySetAsSeries(g_h1_dimArr, true); LogArrayCopyVerification("H1 DI-", diMinusH1, g_h1_dimArr); }
+         g_h1_dim_ok = CopyBufferWithRetry(h_adx, 2, diMinusH1);
+         if (g_h1_dim_ok) { g_h1_dim_ok = (ArrayCopy(g_h1_dimArr, diMinusH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_dimArr, true); if (g_h1_dim_ok) LogArrayCopyVerification("H1 DI-", diMinusH1, g_h1_dimArr); }
       }
       if (!g_h1_emaS_ok)
       {
-         g_h1_emaS_ok = CopyBufferWithRetry(h_emaS, 0, emaShortH1) && AreIndicatorValuesValid(emaShortH1);
-         if (g_h1_emaS_ok) { ArrayCopy(g_h1_emaSArr, emaShortH1); ArraySetAsSeries(g_h1_emaSArr, true); LogArrayCopyVerification("H1 EMA短", emaShortH1, g_h1_emaSArr); }
+         g_h1_emaS_ok = CopyBufferWithRetry(h_emaS, 0, emaShortH1);
+         if (g_h1_emaS_ok) { g_h1_emaS_ok = (ArrayCopy(g_h1_emaSArr, emaShortH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_emaSArr, true); if (g_h1_emaS_ok) LogArrayCopyVerification("H1 EMA短", emaShortH1, g_h1_emaSArr); }
       }
       if (!g_h1_emaL_ok)
       {
-         g_h1_emaL_ok = CopyBufferWithRetry(h_emaL, 0, emaLongH1) && AreIndicatorValuesValid(emaLongH1);
-         if (g_h1_emaL_ok) { ArrayCopy(g_h1_emaLArr, emaLongH1); ArraySetAsSeries(g_h1_emaLArr, true); LogArrayCopyVerification("H1 EMA長", emaLongH1, g_h1_emaLArr); }
+         g_h1_emaL_ok = CopyBufferWithRetry(h_emaL, 0, emaLongH1);
+         if (g_h1_emaL_ok) { g_h1_emaL_ok = (ArrayCopy(g_h1_emaLArr, emaLongH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_emaLArr, true); if (g_h1_emaL_ok) LogArrayCopyVerification("H1 EMA長", emaLongH1, g_h1_emaLArr); }
       }
       g_h1AllOk = g_h1_adx_ok && g_h1_dip_ok && g_h1_dim_ok && g_h1_emaS_ok && g_h1_emaL_ok;
       if (!g_h1AllOk)
@@ -765,20 +775,23 @@ public:
       double rsiBuffer[], mainBuffer[], sigBuffer[];
       if (!g_m15_rsi_ok)
       {
-         g_m15_rsi_ok = CopyBufferWithRetry(rsiH, 0, rsiBuffer) && AreIndicatorValuesValid(rsiBuffer);
-         if (g_m15_rsi_ok) { ArrayCopy(g_m15_rsiArr, rsiBuffer); ArraySetAsSeries(g_m15_rsiArr, true); LogArrayCopyVerification("M15 RSI", rsiBuffer, g_m15_rsiArr); }
+         g_m15_rsi_ok = CopyBufferWithRetry(rsiH, 0, rsiBuffer);
+         if (g_m15_rsi_ok) { g_m15_rsi_ok = (ArrayCopy(g_m15_rsiArr, rsiBuffer) == INDICATOR_BARS); ArraySetAsSeries(g_m15_rsiArr, true); if (g_m15_rsi_ok) LogArrayCopyVerification("M15 RSI", rsiBuffer, g_m15_rsiArr); }
       }
       if (!g_m15_macd_ok)
       {
-         bool mainOk = CopyBufferWithRetry(macdH, 0, mainBuffer) && AreIndicatorValuesValid(mainBuffer);
-         bool sigOk = CopyBufferWithRetry(macdH, 1, sigBuffer) && AreIndicatorValuesValid(sigBuffer);
+         bool mainOk = CopyBufferWithRetry(macdH, 0, mainBuffer);
+         bool sigOk = CopyBufferWithRetry(macdH, 1, sigBuffer);
          g_m15_macd_ok = mainOk && sigOk;
          if (g_m15_macd_ok)
          {
-            ArrayCopy(g_m15_macdMainAll, mainBuffer); ArraySetAsSeries(g_m15_macdMainAll, true);
-            ArrayCopy(g_m15_macdSigAll, sigBuffer); ArraySetAsSeries(g_m15_macdSigAll, true);
-            LogArrayCopyVerification("M15 MACD Main", mainBuffer, g_m15_macdMainAll);
-            LogArrayCopyVerification("M15 MACD Signal", sigBuffer, g_m15_macdSigAll);
+            g_m15_macd_ok = (ArrayCopy(g_m15_macdMainAll, mainBuffer) == INDICATOR_BARS && ArrayCopy(g_m15_macdSigAll, sigBuffer) == INDICATOR_BARS);
+            ArraySetAsSeries(g_m15_macdMainAll, true); ArraySetAsSeries(g_m15_macdSigAll, true);
+            if (g_m15_macd_ok)
+            {
+               LogArrayCopyVerification("M15 MACD Main", mainBuffer, g_m15_macdMainAll);
+               LogArrayCopyVerification("M15 MACD Signal", sigBuffer, g_m15_macdSigAll);
+            }
          }
       }
       g_m15AllOk = g_m15_rsi_ok && g_m15_macd_ok;
@@ -860,42 +873,59 @@ public:
       double midBuffer[], upperBuffer[], lowerBuffer[], kBuffer[], dBuffer[], atrBuffer[];
       if (!g_m1_bb_ok)
       {
-         bool midOk = CopyBufferWithRetry(h_bb, 0, midBuffer) && AreIndicatorValuesValid(midBuffer);
-         bool upperOk = CopyBufferWithRetry(h_bb, 1, upperBuffer) && AreIndicatorValuesValid(upperBuffer);
-         bool lowerOk = CopyBufferWithRetry(h_bb, 2, lowerBuffer) && AreIndicatorValuesValid(lowerBuffer);
+         bool midOk = CopyBufferWithRetry(h_bb, 0, midBuffer);
+         bool upperOk = CopyBufferWithRetry(h_bb, 1, upperBuffer);
+         bool lowerOk = CopyBufferWithRetry(h_bb, 2, lowerBuffer);
          g_m1_bb_ok = midOk && upperOk && lowerOk;
          if (g_m1_bb_ok)
          {
-            ArrayCopy(g_bbMiddle, midBuffer); ArraySetAsSeries(g_bbMiddle, true);
-            ArrayCopy(g_bbUpper, upperBuffer); ArraySetAsSeries(g_bbUpper, true);
-            ArrayCopy(g_bbLower, lowerBuffer); ArraySetAsSeries(g_bbLower, true);
-            LogArrayCopyVerification("M1 BB中", midBuffer, g_bbMiddle);
-            LogArrayCopyVerification("M1 BB上", upperBuffer, g_bbUpper);
-            LogArrayCopyVerification("M1 BB下", lowerBuffer, g_bbLower);
+            g_m1_bb_ok = (ArrayCopy(g_bbMiddle, midBuffer) == INDICATOR_BARS &&
+                          ArrayCopy(g_bbUpper, upperBuffer) == INDICATOR_BARS &&
+                          ArrayCopy(g_bbLower, lowerBuffer) == INDICATOR_BARS);
+            ArraySetAsSeries(g_bbMiddle, true); ArraySetAsSeries(g_bbUpper, true); ArraySetAsSeries(g_bbLower, true);
+            if (g_m1_bb_ok)
+            {
+               LogArrayCopyVerification("M1 BB中", midBuffer, g_bbMiddle);
+               LogArrayCopyVerification("M1 BB上", upperBuffer, g_bbUpper);
+               LogArrayCopyVerification("M1 BB下", lowerBuffer, g_bbLower);
+            }
          }
       }
       if (!g_m1_stoch_ok)
       {
-         bool kOk = CopyBufferWithRetry(h_stoch, 0, kBuffer) && AreIndicatorValuesValid(kBuffer);
-         bool dOk = CopyBufferWithRetry(h_stoch, 1, dBuffer) && AreIndicatorValuesValid(dBuffer);
+         bool kOk = CopyBufferWithRetry(h_stoch, 0, kBuffer);
+         bool dOk = CopyBufferWithRetry(h_stoch, 1, dBuffer);
          g_m1_stoch_ok = kOk && dOk;
          if (g_m1_stoch_ok)
          {
-            ArrayCopy(g_stochK, kBuffer); ArraySetAsSeries(g_stochK, true);
-            ArrayCopy(g_stochD, dBuffer); ArraySetAsSeries(g_stochD, true);
-            LogArrayCopyVerification("M1 Stoch K", kBuffer, g_stochK);
-            LogArrayCopyVerification("M1 Stoch D", dBuffer, g_stochD);
+            g_m1_stoch_ok = (ArrayCopy(g_stochK, kBuffer) == INDICATOR_BARS &&
+                             ArrayCopy(g_stochD, dBuffer) == INDICATOR_BARS);
+            ArraySetAsSeries(g_stochK, true); ArraySetAsSeries(g_stochD, true);
+            if (g_m1_stoch_ok)
+            {
+               LogArrayCopyVerification("M1 Stoch K", kBuffer, g_stochK);
+               LogArrayCopyVerification("M1 Stoch D", dBuffer, g_stochD);
+            }
          }
       }
       if (!g_m1_atr_ok)
       {
-         g_m1_atr_ok = CopyBufferWithRetry(h_atr, 0, atrBuffer) && AreIndicatorValuesValid(atrBuffer);
-         if (g_m1_atr_ok) { ArrayCopy(g_atr, atrBuffer); ArraySetAsSeries(g_atr, true); LogArrayCopyVerification("M1 ATR", atrBuffer, g_atr); }
+         g_m1_atr_ok = CopyBufferWithRetry(h_atr, 0, atrBuffer);
+         if (g_m1_atr_ok) { g_m1_atr_ok = (ArrayCopy(g_atr, atrBuffer) == INDICATOR_BARS); ArraySetAsSeries(g_atr, true); if (g_m1_atr_ok) LogArrayCopyVerification("M1 ATR", atrBuffer, g_atr); }
       }
-      bool pricesOk = CopyHigh(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, g_m1High) == INDICATOR_BARS &&
-                      CopyLow(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, g_m1Low) == INDICATOR_BARS &&
-                      CopyClose(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, g_m1Close) == INDICATOR_BARS;
-      ArraySetAsSeries(g_m1High, true); ArraySetAsSeries(g_m1Low, true); ArraySetAsSeries(g_m1Close, true);
+      double m1High[], m1Low[], m1Close[];
+      ArraySetAsSeries(m1High, true); ArraySetAsSeries(m1Low, true); ArraySetAsSeries(m1Close, true);
+      bool pricesOk = CopyHigh(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1High) == INDICATOR_BARS &&
+                      CopyLow(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Low) == INDICATOR_BARS &&
+                      CopyClose(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Close) == INDICATOR_BARS &&
+                      ArePriceValuesValid(m1High) && ArePriceValuesValid(m1Low) && ArePriceValuesValid(m1Close);
+      if (pricesOk)
+      {
+         pricesOk = (ArrayCopy(g_m1High, m1High) == INDICATOR_BARS &&
+                     ArrayCopy(g_m1Low, m1Low) == INDICATOR_BARS &&
+                     ArrayCopy(g_m1Close, m1Close) == INDICATOR_BARS);
+         ArraySetAsSeries(g_m1High, true); ArraySetAsSeries(g_m1Low, true); ArraySetAsSeries(g_m1Close, true);
+      }
       g_m1AllOk = g_m1_bb_ok && g_m1_stoch_ok && g_m1_atr_ok && pricesOk;
       if (!g_m1AllOk)
       {
