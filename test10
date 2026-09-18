@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.15"
+#property version   "3.16"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -136,10 +136,6 @@ enum DivergenceType
 // ===================================================================
 // グローバル変数とオブジェクトの定義
 // ===================================================================
-CTrend1H TrendH1;
-CTrend15 TrendM15;
-CTrend1M TrendM1;
-
 datetime LastH1 = 0, LastM15 = 0, LastM1 = 0;
 int NowPositions = 0, BuyCount = 0, SellCount = 0;
 
@@ -495,7 +491,7 @@ void CollectPeakIndices(const double &values[], int count, bool higherIsPeak, in
          }
 }
 
-int GetDirectionFromPoints(const double values[], int points)
+int GetDirectionFromPoints(const double &values[], int points)
 {
    if (points < 3)
       return 0;
@@ -589,24 +585,24 @@ DivergenceType CalculateRsiDivergence(int rsiHandle)
 
 DivergenceType CalculateMacdDivergence(int macdHandle)
 {
-   double priceHigh[], priceLow[], macdMain[], macdSignal[];
+   double priceHigh[], priceLow[], macdMain[], macdSignalBuffer[];
    ArrayResize(priceHigh, DIVERGENCE_PERIOD);
    ArrayResize(priceLow, DIVERGENCE_PERIOD);
    ArrayResize(macdMain, DIVERGENCE_PERIOD);
-   ArrayResize(macdSignal, DIVERGENCE_PERIOD);
+   ArrayResize(macdSignalBuffer, DIVERGENCE_PERIOD);
    ArraySetAsSeries(priceHigh, true);
    ArraySetAsSeries(priceLow, true);
    ArraySetAsSeries(macdMain, true);
-   ArraySetAsSeries(macdSignal, true);
+   ArraySetAsSeries(macdSignalBuffer, true);
       if (CopyHigh(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceHigh) != DIVERGENCE_PERIOD ||
          CopyLow(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceLow) != DIVERGENCE_PERIOD ||
          CopyBuffer(macdHandle, 0, 0, DIVERGENCE_PERIOD, macdMain) != DIVERGENCE_PERIOD ||
-         CopyBuffer(macdHandle, 1, 0, DIVERGENCE_PERIOD, macdSignal) != DIVERGENCE_PERIOD)
+         CopyBuffer(macdHandle, 1, 0, DIVERGENCE_PERIOD, macdSignalBuffer) != DIVERGENCE_PERIOD)
       return DIVERGENCE_NONE;
 
    double histogram[DIVERGENCE_PERIOD];
    for (int i = 0; i < DIVERGENCE_PERIOD; i++)
-      histogram[i] = macdMain[i] - macdSignal[i];
+      histogram[i] = macdMain[i] - macdSignalBuffer[i];
    DivergenceType highResult = CheckDivergenceSeries(priceHigh, histogram, DIVERGENCE_PERIOD, true, true);
    DivergenceType lowResult = CheckDivergenceSeries(priceLow, histogram, DIVERGENCE_PERIOD, false, true);
    if ((highResult == DIVERGENCE_BEARISH && lowResult == DIVERGENCE_BULLISH) ||
@@ -1290,6 +1286,10 @@ public:
       g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
    }
 };
+
+CTrend1H TrendH1;
+CTrend15 TrendM15;
+CTrend1M TrendM1;
 
 // ===================================================================
 // 取引関連の補助関数
