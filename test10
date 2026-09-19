@@ -1739,7 +1739,8 @@ void OnTick()
 
    if (ASK <= 0 || BID <= 0)
    {
-      Print("価格データが無効のため処理を中断します。");
+      PrintFormat("価格データが無効のため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント",
+                  ASK, BID, spreadPts);
       return;
    }
 
@@ -1780,7 +1781,8 @@ void OnTick()
    // 決済後にスプレッド閾値チェック（スプレッドが大きければエントリを中止）
    if (spreadPts >= MaxAllowedSpread)
    {
-      Print("スプレッドが閾値を超えたため処理を中断します。");
+      PrintFormat("スプレッドが閾値を超えたため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント 閾値=%dポイント",
+                  ASK, BID, spreadPts, MaxAllowedSpread);
       return;
    }
 
