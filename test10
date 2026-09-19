@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.16"
+#property version   "3.17"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -734,8 +734,8 @@ public:
       g_H1DiDir = diDir;
       g_H1EmaDir = emaDir;
       
-      PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DiDir=%d EmaDir=%d Type=%s State=%s",
-            g_h1_adxArr[1], g_h1_adxArr[2], g_h1_adxArr[3], g_h1_dipArr[1], g_h1_dimArr[1], diDiff, g_h1_emaSArr[1], g_h1_emaLArr[1], diDir, emaDir, TrendTypeToString(m_type), TrendStateToString(m_state));
+      PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DI：%s EMA：%s Type=%s State=%s",
+         g_h1_adxArr[1], g_h1_adxArr[2], g_h1_adxArr[3], g_h1_dipArr[1], g_h1_dimArr[1], diDiff, g_h1_emaSArr[1], g_h1_emaLArr[1], diDir > 0 ? "上方向" : diDir < 0 ? "下方向" : "方向性なし", emaDir > 0 ? "上方向" : emaDir < 0 ? "下方向" : "方向性なし", TrendTypeToString(m_type), TrendStateToString(m_state));
       return(true);
    }
    TrendType getType() const { return(m_type); }
@@ -953,7 +953,7 @@ public:
       g_superTrendPullbackSell = false;
 
       PrintFormat("M1確定値 ATR=%.5f BB上=%.5f BB中=%.5f BB下=%.5f StochK=%.3f StochD=%.3f", g_atr[1], g_bbUpper[1], g_bbMiddle[1], g_bbLower[1], g_stochK[1], g_stochD[1]);
-      PrintFormat("M1 SuperTrend更新値=%.5f 方向=%d", g_superTrend[1], g_superTrendDir[1]);
+      PrintFormat("M1 SuperTrend更新値=%.5f 方向=%s", g_superTrend[1], g_superTrendDir[1] > 0 ? "上" : "下");
       return(true);
    }
 
@@ -1282,8 +1282,11 @@ public:
       g_previousAsk = ask;
       g_previousBid = bid;
 
-      g_canEntryBuy = g_superTrendFlipBuy || g_superTrendReaccelBuy || g_TrendStateH == RANGE_TO_TREND;
-      g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
+      if (g_TrendTypeH != TREND_RANGE && g_TrendTypeH != TREND_UNKNOWN)
+      {
+         g_canEntryBuy = g_superTrendFlipBuy || g_superTrendReaccelBuy || g_TrendStateH == RANGE_TO_TREND;
+         g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
+      }
    }
 };
 
@@ -1482,7 +1485,7 @@ int OnInit()
       return (INIT_FAILED);
    }
 
-   h_bb = iBands(_Symbol, PERIOD_M1, bbPeriod, bbDeviation, 0, PRICE_CLOSE);
+   h_bb = iBands(_Symbol, PERIOD_M1, bbPeriod, 0, bbDeviation, PRICE_CLOSE);
    if (h_bb == INVALID_HANDLE)
    {
       Print("BBハンドルの作成に失敗しました。");
