@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.18"
+#property version   "3.19"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -29,6 +29,12 @@ input int    MaxAllowedSpread      = 25;    // 最大許容スプレッド（ポ
 input int    SL_Points             = 40;    // ストップロス幅（ポイント）
 input int MinSLUpdatePoints        = 1;     // SL更新の最低差分（ポイント）
 input double RiskRewardRatio       = 2.0;   // リスク・リワード比率
+input bool EnableStochasticClose   = true;  // Stochastic決済
+input bool EnableRangeBBClose      = true;  // レンジBB逆側決済
+input bool EnableTrendSuperTrendClose = true; // トレンドSuperTrend決済
+input bool EnableTrendBBMiddleClose = true; // トレンドBB中央線緊急決済
+input bool EnableRangeTP            = true;  // レンジTP
+input bool EnableStopLoss           = true;  // 保護用SL
 
 // ===================================================================
 // 内部パラメータ（input にはしない）
@@ -193,6 +199,12 @@ bool g_closeBuyOnOrAbove = false;  // BUY 決済閾値は上抜け/以上基準�
 bool g_closeSellOnOrBelow = false; // SELL 決済閾値は下抜け/以下基準か
 bool g_stochasticCloseBuy = false;
 bool g_stochasticCloseSell = false;
+bool g_rangeBBCloseBuy = false;
+bool g_rangeBBCloseSell = false;
+bool g_trendSuperTrendCloseBuy = false;
+bool g_trendSuperTrendCloseSell = false;
+bool g_trendBBMiddleCloseBuy = false;
+bool g_trendBBMiddleCloseSell = false;
 
 // エントリー判定フラグ：ブレイク後リトレース用
 bool g_entryThresholdCrossedBuy = false;   // BUY エントリー閾値超えフラグ（初期OFF）
@@ -285,17 +297,40 @@ bool ArePriceValuesValid(const double &values[])
    return(true);
 }
 
-bool CopyBufferWithRetry(int handle, int buffer, double &values[])
+void LogArrayValues(const string name, const double &values[])
+{
+   for (int i = 0; i < ArraySize(values); i++)
+      PrintFormat("取得成功 %s[%d]=%.10f", name, i, values[i]);
+}
+
+void LogInvalidArrayValues(const string name, const double &values[])
+{
+   for (int i = 0; i < ArraySize(values); i++)
+      if (!IsIndicatorValueValid(values[i]))
+         PrintFormat("無効値 %s[%d]=%.10f EMPTY=%s NaN=%s", name, i, values[i], values[i] == EMPTY_VALUE ? "YES" : "NO", MathIsValidNumber(values[i]) ? "NO" : "YES");
+}
+
+bool CopyBufferWithRetry(int handle, int buffer, double &values[], const string name = "", ENUM_TIMEFRAMES timeframe = PERIOD_CURRENT)
 {
    ArraySetAsSeries(values, true);
+   int copied = 0;
    for (int attempt = 0; attempt < 3; attempt++)
    {
-      if (CopyBuffer(handle, buffer, 0, INDICATOR_BARS, values) == INDICATOR_BARS &&
+      ResetLastError();
+      copied = CopyBuffer(handle, buffer, 0, INDICATOR_BARS, values);
+      if (copied == INDICATOR_BARS &&
           AreIndicatorValuesValid(values))
+      {
+         if (name != "")
+            LogArrayValues(name, values);
          return(true);
+      }
       if (attempt < 2)
          Sleep(100);
    }
+   PrintFormat("指標取得失敗 name=%s handle=%d timeframe=%s required=%d copied=%d lastError=%d", name, handle, EnumToString(timeframe), INDICATOR_BARS, copied, GetLastError());
+   LogArrayValues(name, values);
+   LogInvalidArrayValues(name, values);
    return(false);
 }
 
@@ -304,6 +339,18 @@ void LogArrayCopyVerification(const string name, const double &local[], const do
    // 必要な検証時だけコメントを外して、local[0..13] と global[0..13] を比較する。
    // for (int i = 0; i < INDICATOR_BARS; i++)
    //    PrintFormat("%s[%d] local=%.10f global=%.10f", name, i, local[i], global[i]);
+}
+
+void LogPriceValues(const string name, const double &values[])
+{
+   for (int i = 0; i < ArraySize(values); i++)
+      PrintFormat("価格取得成功 %s[%d]=%.10f", name, i, values[i]);
+}
+
+void LogPriceCopyFailure(const string name, int copied, const double &values[])
+{
+   PrintFormat("価格取得失敗 name=%s required=%d copied=%d lastError=%d", name, INDICATOR_BARS, copied, GetLastError());
+   LogInvalidArrayValues(name, values);
 }
 
 bool IsDivergenceValueValid(double v)
@@ -638,27 +685,27 @@ public:
       double adxH1[], diPlusH1[], diMinusH1[], emaShortH1[], emaLongH1[];
       if (!g_h1_adx_ok)
       {
-         g_h1_adx_ok = CopyBufferWithRetry(h_adx, 0, adxH1);
+         g_h1_adx_ok = CopyBufferWithRetry(h_adx, 0, adxH1, "H1 ADX", PERIOD_H1);
          if (g_h1_adx_ok) { g_h1_adx_ok = (ArrayCopy(g_h1_adxArr, adxH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_adxArr, true); if (g_h1_adx_ok) LogArrayCopyVerification("H1 ADX", adxH1, g_h1_adxArr); }
       }
       if (!g_h1_dip_ok)
       {
-         g_h1_dip_ok = CopyBufferWithRetry(h_adx, 1, diPlusH1);
+         g_h1_dip_ok = CopyBufferWithRetry(h_adx, 1, diPlusH1, "H1 DI+", PERIOD_H1);
          if (g_h1_dip_ok) { g_h1_dip_ok = (ArrayCopy(g_h1_dipArr, diPlusH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_dipArr, true); if (g_h1_dip_ok) LogArrayCopyVerification("H1 DI+", diPlusH1, g_h1_dipArr); }
       }
       if (!g_h1_dim_ok)
       {
-         g_h1_dim_ok = CopyBufferWithRetry(h_adx, 2, diMinusH1);
+         g_h1_dim_ok = CopyBufferWithRetry(h_adx, 2, diMinusH1, "H1 DI-", PERIOD_H1);
          if (g_h1_dim_ok) { g_h1_dim_ok = (ArrayCopy(g_h1_dimArr, diMinusH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_dimArr, true); if (g_h1_dim_ok) LogArrayCopyVerification("H1 DI-", diMinusH1, g_h1_dimArr); }
       }
       if (!g_h1_emaS_ok)
       {
-         g_h1_emaS_ok = CopyBufferWithRetry(h_emaS, 0, emaShortH1);
+         g_h1_emaS_ok = CopyBufferWithRetry(h_emaS, 0, emaShortH1, "H1 EMA Short", PERIOD_H1);
          if (g_h1_emaS_ok) { g_h1_emaS_ok = (ArrayCopy(g_h1_emaSArr, emaShortH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_emaSArr, true); if (g_h1_emaS_ok) LogArrayCopyVerification("H1 EMA短", emaShortH1, g_h1_emaSArr); }
       }
       if (!g_h1_emaL_ok)
       {
-         g_h1_emaL_ok = CopyBufferWithRetry(h_emaL, 0, emaLongH1);
+         g_h1_emaL_ok = CopyBufferWithRetry(h_emaL, 0, emaLongH1, "H1 EMA Long", PERIOD_H1);
          if (g_h1_emaL_ok) { g_h1_emaL_ok = (ArrayCopy(g_h1_emaLArr, emaLongH1) == INDICATOR_BARS); ArraySetAsSeries(g_h1_emaLArr, true); if (g_h1_emaL_ok) LogArrayCopyVerification("H1 EMA長", emaLongH1, g_h1_emaLArr); }
       }
       g_h1AllOk = g_h1_adx_ok && g_h1_dip_ok && g_h1_dim_ok && g_h1_emaS_ok && g_h1_emaL_ok;
@@ -771,13 +818,13 @@ public:
       double rsiBuffer[], mainBuffer[], sigBuffer[];
       if (!g_m15_rsi_ok)
       {
-         g_m15_rsi_ok = CopyBufferWithRetry(rsiH, 0, rsiBuffer);
+         g_m15_rsi_ok = CopyBufferWithRetry(rsiH, 0, rsiBuffer, "M15 RSI", PERIOD_M15);
          if (g_m15_rsi_ok) { g_m15_rsi_ok = (ArrayCopy(g_m15_rsiArr, rsiBuffer) == INDICATOR_BARS); ArraySetAsSeries(g_m15_rsiArr, true); if (g_m15_rsi_ok) LogArrayCopyVerification("M15 RSI", rsiBuffer, g_m15_rsiArr); }
       }
       if (!g_m15_macd_ok)
       {
-         bool mainOk = CopyBufferWithRetry(macdH, 0, mainBuffer);
-         bool sigOk = CopyBufferWithRetry(macdH, 1, sigBuffer);
+         bool mainOk = CopyBufferWithRetry(macdH, 0, mainBuffer, "M15 MACD Main", PERIOD_M15);
+         bool sigOk = CopyBufferWithRetry(macdH, 1, sigBuffer, "M15 MACD Signal", PERIOD_M15);
          g_m15_macd_ok = mainOk && sigOk;
          if (g_m15_macd_ok)
          {
@@ -869,9 +916,9 @@ public:
       double midBuffer[], upperBuffer[], lowerBuffer[], kBuffer[], dBuffer[], atrBuffer[];
       if (!g_m1_bb_ok)
       {
-         bool midOk = CopyBufferWithRetry(h_bb, 0, midBuffer);
-         bool upperOk = CopyBufferWithRetry(h_bb, 1, upperBuffer);
-         bool lowerOk = CopyBufferWithRetry(h_bb, 2, lowerBuffer);
+         bool midOk = CopyBufferWithRetry(h_bb, 0, midBuffer, "M1 BB Middle", PERIOD_M1);
+         bool upperOk = CopyBufferWithRetry(h_bb, 1, upperBuffer, "M1 BB Upper", PERIOD_M1);
+         bool lowerOk = CopyBufferWithRetry(h_bb, 2, lowerBuffer, "M1 BB Lower", PERIOD_M1);
          g_m1_bb_ok = midOk && upperOk && lowerOk;
          if (g_m1_bb_ok)
          {
@@ -889,8 +936,8 @@ public:
       }
       if (!g_m1_stoch_ok)
       {
-         bool kOk = CopyBufferWithRetry(h_stoch, 0, kBuffer);
-         bool dOk = CopyBufferWithRetry(h_stoch, 1, dBuffer);
+         bool kOk = CopyBufferWithRetry(h_stoch, 0, kBuffer, "M1 Stochastic K", PERIOD_M1);
+         bool dOk = CopyBufferWithRetry(h_stoch, 1, dBuffer, "M1 Stochastic D", PERIOD_M1);
          g_m1_stoch_ok = kOk && dOk;
          if (g_m1_stoch_ok)
          {
@@ -906,21 +953,41 @@ public:
       }
       if (!g_m1_atr_ok)
       {
-         g_m1_atr_ok = CopyBufferWithRetry(h_atr, 0, atrBuffer);
+         g_m1_atr_ok = CopyBufferWithRetry(h_atr, 0, atrBuffer, "M1 ATR", PERIOD_M1);
          if (g_m1_atr_ok) { g_m1_atr_ok = (ArrayCopy(g_atr, atrBuffer) == INDICATOR_BARS); ArraySetAsSeries(g_atr, true); if (g_m1_atr_ok) LogArrayCopyVerification("M1 ATR", atrBuffer, g_atr); }
       }
       double m1High[], m1Low[], m1Close[];
       ArraySetAsSeries(m1High, true); ArraySetAsSeries(m1Low, true); ArraySetAsSeries(m1Close, true);
-      bool pricesOk = CopyHigh(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1High) == INDICATOR_BARS &&
-                      CopyLow(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Low) == INDICATOR_BARS &&
-                      CopyClose(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Close) == INDICATOR_BARS &&
-                      ArePriceValuesValid(m1High) && ArePriceValuesValid(m1Low) && ArePriceValuesValid(m1Close);
+      ResetLastError();
+      int highCopied = CopyHigh(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1High);
+      int highError = GetLastError();
+      ResetLastError();
+      int lowCopied = CopyLow(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Low);
+      int lowError = GetLastError();
+      ResetLastError();
+      int closeCopied = CopyClose(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Close);
+      int closeError = GetLastError();
+      bool pricesOk = highCopied == INDICATOR_BARS && lowCopied == INDICATOR_BARS && closeCopied == INDICATOR_BARS &&
+                ArePriceValuesValid(m1High) && ArePriceValuesValid(m1Low) && ArePriceValuesValid(m1Close);
       if (pricesOk)
       {
          pricesOk = (ArrayCopy(g_m1High, m1High) == INDICATOR_BARS &&
                      ArrayCopy(g_m1Low, m1Low) == INDICATOR_BARS &&
                      ArrayCopy(g_m1Close, m1Close) == INDICATOR_BARS);
          ArraySetAsSeries(g_m1High, true); ArraySetAsSeries(g_m1Low, true); ArraySetAsSeries(g_m1Close, true);
+         LogPriceValues("M1 High", m1High);
+         LogPriceValues("M1 Low", m1Low);
+         LogPriceValues("M1 Close", m1Close);
+      }
+      else
+      {
+         PrintFormat("M1価格取得失敗 High=%d/%d err=%d Low=%d/%d err=%d Close=%d/%d err=%d", highCopied, INDICATOR_BARS, highError, lowCopied, INDICATOR_BARS, lowError, closeCopied, INDICATOR_BARS, closeError);
+         LogPriceValues("M1 High", m1High);
+         LogPriceValues("M1 Low", m1Low);
+         LogPriceValues("M1 Close", m1Close);
+         LogInvalidArrayValues("M1 High", m1High);
+         LogInvalidArrayValues("M1 Low", m1Low);
+         LogInvalidArrayValues("M1 Close", m1Close);
       }
       g_m1AllOk = g_m1_bb_ok && g_m1_stoch_ok && g_m1_atr_ok && pricesOk;
       if (!g_m1AllOk)
@@ -1131,6 +1198,12 @@ public:
       g_canCloseSell = false;
       g_stochasticCloseBuy = false;
       g_stochasticCloseSell = false;
+      g_rangeBBCloseBuy = false;
+      g_rangeBBCloseSell = false;
+      g_trendSuperTrendCloseBuy = false;
+      g_trendSuperTrendCloseSell = false;
+      g_trendBBMiddleCloseBuy = false;
+      g_trendBBMiddleCloseSell = false;
       g_pullbackThresholdBuy = 0.0;
       g_pullbackThresholdSell = 0.0;
       g_reaccelThresholdBuy = 0.0;
@@ -1145,8 +1218,8 @@ public:
          g_reaccelThresholdSell = g_superTrend[1] - atrValue * reaccelAtrFactor;
       }
 
-      bool stochCrossDown = g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
-      bool stochCrossUp = g_stochK[2] <= g_stochD[2] && g_stochK[1] > g_stochD[1];
+      bool stochCrossDown = g_stochK[2] > stochOverbought && g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
+      bool stochCrossUp = g_stochK[2] < stochOversold && g_stochK[2] <= g_stochD[2] && g_stochK[1] > g_stochD[1];
       bool buyOverheatReversal = g_stochK[2] > stochOverbought && g_stochK[1] < g_stochK[2];
       bool sellOverheatReversal = g_stochK[2] < stochOversold && g_stochK[1] > g_stochK[2];
       g_stochasticCloseBuy = stochCrossDown || buyOverheatReversal;
@@ -1205,19 +1278,23 @@ public:
       {
          double close1 = iClose(_Symbol, PERIOD_M1, 1);
          double close2 = iClose(_Symbol, PERIOD_M1, 2);
-         g_stochasticCloseBuy = g_stochasticCloseBuy || (close2 < g_bbMiddle[2] && close1 >= g_bbMiddle[1]);
-         g_stochasticCloseSell = g_stochasticCloseSell || (close2 > g_bbMiddle[2] && close1 <= g_bbMiddle[1]);
+         g_trendBBMiddleCloseBuy = close2 < g_bbMiddle[2] && close1 >= g_bbMiddle[1];
+         g_trendBBMiddleCloseSell = close2 > g_bbMiddle[2] && close1 <= g_bbMiddle[1];
       }
 
       if (h1Type == TREND_RANGE)
       {
          g_closeBuyOnOrAbove = true;
          g_closeSellOnOrBelow = true;
+         g_rangeBBCloseBuy = true;
+         g_rangeBBCloseSell = true;
       }
       else
       {
          g_closeBuyOnOrAbove = false;
          g_closeSellOnOrBelow = false;
+         g_trendSuperTrendCloseBuy = h1Type != TREND_UNKNOWN;
+         g_trendSuperTrendCloseSell = h1Type != TREND_UNKNOWN;
       }
 
       if (g_entryPriceBuy <= 0.0)
@@ -1302,6 +1379,7 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp)
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double spreadPts = (ask - bid) / _Point;
+   double requestedPrice = type == ORDER_TYPE_BUY ? ask : bid;
    if (spreadPts > MaxAllowedSpread)
    {
       PrintFormat("発注中止：スプレッドが大きすぎます (%.1f)", spreadPts);
@@ -1317,6 +1395,7 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp)
    req.deviation = 10;
    req.type_filling = ORDER_FILLING_FOK;
    req.magic = MagicNumber;
+   req.price = requestedPrice;
    req.sl = sl;
    req.tp = tp;
    req.type = type;
@@ -1324,31 +1403,36 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp)
    if (!sent)
    {
       RecordRequest(REQUEST_SEND_FAILED, res.retcode);
-      PrintFormat("OrderSend 失敗 err=%d retcode=%d comment=%s", GetLastError(), res.retcode, res.comment);
+      PrintFormat("発注失敗 type=%s price=%.5f lot=%.2f SL=%.5f TP=%.5f spread=%.1f magic=%I64d retcode=%d comment=%s err=%d", type == ORDER_TYPE_BUY ? "BUY" : "SELL", requestedPrice, volume, sl, tp, spreadPts, MagicNumber, res.retcode, res.comment, GetLastError());
       return (false);
    }
    if (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL)
    {
       RecordRequest(REQUEST_EXECUTION_FAILED, res.retcode);
-      PrintFormat("OrderSend 実行失敗 retcode=%d comment=%s", res.retcode, res.comment);
+      PrintFormat("発注実行失敗 type=%s price=%.5f lot=%.2f SL=%.5f TP=%.5f spread=%.1f magic=%I64d retcode=%d comment=%s err=%d", type == ORDER_TYPE_BUY ? "BUY" : "SELL", requestedPrice, volume, sl, tp, spreadPts, MagicNumber, res.retcode, res.comment, GetLastError());
       return false;
    }
    RecordRequest(REQUEST_EXECUTION_SUCCEEDED, res.retcode);
-   PrintFormat("OrderSend 成功 type=%s ticket=%I64u order=%I64u deal=%I64u lot=%.2f price=%.5f retcode=%d comment=%s",
+   PrintFormat("発注成功 type=%s price=%.5f lot=%.2f SL=%.5f TP=%.5f spread=%.1f magic=%I64d order=%I64u deal=%I64u retcode=%d comment=%s",
                type == ORDER_TYPE_BUY ? "BUY" : "SELL",
-               res.order, res.order, res.deal, volume, res.price, res.retcode, res.comment);
+               requestedPrice, volume, sl, tp, spreadPts, MagicNumber, res.order, res.deal, res.retcode, res.comment);
    return (true);
 }
 
 // ===================================================================
 // ポジションの決済と逆指値更新の補助関数
 // ===================================================================
-bool ClosePositionByTicket(ulong ticket)
+bool ClosePositionByTicket(ulong ticket, const string reason)
 {
    if (!PositionSelectByTicket(ticket))
       return (false);
    long ptype = PositionGetInteger(POSITION_TYPE);
    double vol = PositionGetDouble(POSITION_VOLUME);
+   double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double spreadPts = (ask - bid) / _Point;
+   double requestedPrice = ptype == POSITION_TYPE_BUY ? bid : ask;
    MqlTradeRequest req;
    MqlTradeResult res;
    ZeroMemory(req);
@@ -1360,22 +1444,25 @@ bool ClosePositionByTicket(ulong ticket)
    req.deviation = 10;
    req.type_filling = ORDER_FILLING_FOK;
    req.magic = MagicNumber;
+   req.price = requestedPrice;
    req.type = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    bool sent = OrderSend(req, res);
    if (!sent)
    {
       RecordRequest(REQUEST_SEND_FAILED, res.retcode);
-      PrintFormat("決済失敗 err=%d ret=%d", GetLastError(), res.retcode);
+      PrintFormat("決済失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
       return (false);
    }
    if (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL)
    {
       RecordRequest(REQUEST_EXECUTION_FAILED, res.retcode);
-      PrintFormat("決済実行失敗 ret=%d", res.retcode);
+      PrintFormat("決済実行失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
       return false;
    }
    RecordRequest(REQUEST_EXECUTION_SUCCEEDED, res.retcode);
-   PrintFormat("決済成功 ticket=%I64u deal=%I64u", ticket, res.order);
+   double closePrice = res.price > 0.0 ? res.price : requestedPrice;
+   double priceDifference = ptype == POSITION_TYPE_BUY ? closePrice - openPrice : openPrice - closePrice;
+   PrintFormat("決済成功 type=%s ticket=%I64u entry=%.5f exit=%.5f lot=%.2f spread=%.1f 差額=%.5f reason=%s retcode=%d comment=%s deal=%I64u order=%I64u", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, closePrice, vol, spreadPts, priceDifference, reason, res.retcode, res.comment, res.deal, res.order);
    return (true);
 }
 
@@ -1400,27 +1487,35 @@ bool IsPyramidAllowedByM15(bool isBuy)
 // ===================================================================
 bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
 {
+   if (!PositionSelectByTicket(ticket))
+      return(false);
+   long ptype = PositionGetInteger(POSITION_TYPE);
+   double currentSL = PositionGetDouble(POSITION_SL);
+   double currentPrice = ptype == POSITION_TYPE_BUY ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    bool sent = trade.PositionModify(ticket, newSL, newTP);
    uint retcode = trade.ResultRetcode();
    if (!sent)
    {
       RecordRequest(REQUEST_SEND_FAILED, retcode);
-      PrintFormat("逆指値更新失敗 err=%d", GetLastError());
+      PrintFormat("SL更新失敗 ticket=%I64u type=%s currentSL=%.5f newSL=%.5f price=%.5f retcode=%d comment=%s err=%d", ticket, ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", currentSL, newSL, currentPrice, retcode, trade.ResultComment(), GetLastError());
       return (false);
    }
    if (retcode != TRADE_RETCODE_DONE)
    {
       RecordRequest(REQUEST_EXECUTION_FAILED, retcode);
-      PrintFormat("逆指値更新実行失敗 ret=%d", retcode);
+      PrintFormat("SL更新実行失敗 ticket=%I64u type=%s currentSL=%.5f newSL=%.5f price=%.5f retcode=%d comment=%s err=%d", ticket, ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", currentSL, newSL, currentPrice, retcode, trade.ResultComment(), GetLastError());
       return false;
    }
    RecordRequest(REQUEST_EXECUTION_SUCCEEDED, retcode);
-   PrintFormat("逆指値更新 成功 ticket=%I64u", ticket);
+   PrintFormat("SL更新成功 ticket=%I64u type=%s currentSL=%.5f newSL=%.5f price=%.5f reason=Trailing Stop retcode=%d comment=%s", ticket, ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", currentSL, newSL, currentPrice, retcode, trade.ResultComment());
    return (true);
 }
 
 void UpdateTrailingStops()
 {
+   if (!EnableStopLoss)
+      return;
+
    double buyNewSL = 0.0;
    double sellNewSL = 0.0;
    if (g_h1AllOk && g_m1AllOk && g_TrendTypeH != TREND_RANGE && g_TrendTypeH != TREND_UNKNOWN && IsIndicatorValueValid(g_superTrend[1]))
@@ -1523,6 +1618,9 @@ int OnInit()
    g_canCloseBuy = g_canCloseSell = false;
    g_entryThresholdCrossedBuy = g_entryThresholdCrossedSell = false;
    g_stochasticCloseBuy = g_stochasticCloseSell = false;
+   g_rangeBBCloseBuy = g_rangeBBCloseSell = false;
+   g_trendSuperTrendCloseBuy = g_trendSuperTrendCloseSell = false;
+   g_trendBBMiddleCloseBuy = g_trendBBMiddleCloseSell = false;
 
    // M15 signal 初期化
    g_M15Signal.barTime = 0;
@@ -1581,19 +1679,38 @@ void OnDeinit(const int reason)
 // ヘルパー関数: 決済処理
 // グローバル変数 g_canCloseBuy/Sell と決済条件を使用
 // ===================================================================
+string BuildCloseReason(bool stochasticCondition, bool rangeBBCondition, bool trendSuperTrendCondition, bool trendBBMiddleCondition)
+{
+   string reason = "";
+   if (stochasticCondition)
+      reason += "Stochastic過熱域クロス/反転";
+   if (rangeBBCondition)
+      reason += reason == "" ? "レンジBB逆側" : ", レンジBB逆側";
+   if (trendSuperTrendCondition)
+      reason += reason == "" ? "トレンドSuperTrend" : ", トレンドSuperTrend";
+   if (trendBBMiddleCondition)
+      reason += reason == "" ? "トレンドBB中央線" : ", トレンドBB中央線";
+   return reason == "" ? "不明" : reason;
+}
+
 void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice, double currentPrice)
 {
    if (!canClose || closePrice <= 0)
       return;
 
    bool isBuy = (posType == POSITION_TYPE_BUY);
-   bool stochasticEmergency = isBuy ? g_stochasticCloseBuy : g_stochasticCloseSell;
-   bool condition = isBuy ? (g_closeBuyOnOrAbove ? currentPrice >= closePrice : currentPrice <= closePrice)
-                          : (g_closeSellOnOrBelow ? currentPrice <= closePrice : currentPrice >= closePrice);
-   if (stochasticEmergency)
-      condition = true;
+   bool priceReached = isBuy ? (g_closeBuyOnOrAbove ? currentPrice >= closePrice : currentPrice <= closePrice)
+                             : (g_closeSellOnOrBelow ? currentPrice <= closePrice : currentPrice >= closePrice);
+   bool rangeBBCondition = EnableRangeBBClose && (isBuy ? g_rangeBBCloseBuy : g_rangeBBCloseSell) && priceReached;
+   bool trendSuperTrendCondition = EnableTrendSuperTrendClose && (isBuy ? g_trendSuperTrendCloseBuy : g_trendSuperTrendCloseSell) && priceReached;
+   bool stochasticCondition = EnableStochasticClose && (isBuy ? g_stochasticCloseBuy : g_stochasticCloseSell);
+   bool trendBBMiddleCondition = EnableTrendBBMiddleClose && (isBuy ? g_trendBBMiddleCloseBuy : g_trendBBMiddleCloseSell);
+   bool condition = rangeBBCondition || trendSuperTrendCondition || stochasticCondition || trendBBMiddleCondition;
    if (!condition)
       return;
+
+   PrintFormat("決済条件状態 type=%s Stochastic=%s RangeBB=%s TrendSuperTrend=%s TrendBB中央線=%s", isBuy ? "BUY" : "SELL", stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
+   string reason = BuildCloseReason(stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
 
    int count = isBuy ? BuyCount : SellCount;
    if (count <= 0)
@@ -1611,14 +1728,8 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
       if (PositionGetInteger(POSITION_TYPE) != posType)
          continue;
 
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      double volume = PositionGetDouble(POSITION_VOLUME);
-      double exitPrice = currentPrice;
-      double profit = isBuy ? (exitPrice - openPrice) * volume : (openPrice - exitPrice) * volume;
-      if (ClosePositionByTicket(ticket))
+      if (ClosePositionByTicket(ticket, reason))
       {
-         PrintFormat("OnTick: %s 決済 ticket=%I64u entry=%.5f exit=%.5f profit=%.5f",
-                     isBuy ? "BUY" : "SELL", ticket, openPrice, exitPrice, profit);
          if (isBuy)
             g_lastBuyCloseBarTime = LastM1;
          else
@@ -1682,9 +1793,9 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       return;
 
    double price = currentPrice;
-   double sl = isBuy ? (price - SL_Points * _Point) : (price + SL_Points * _Point);
+   double sl = EnableStopLoss ? (isBuy ? (price - SL_Points * _Point) : (price + SL_Points * _Point)) : 0.0;
    double tp = 0.0;
-   if (g_TrendTypeH == TREND_RANGE)
+   if (g_TrendTypeH == TREND_RANGE && EnableRangeTP)
       tp = isBuy ? (price + SL_Points * RiskRewardRatio * _Point) : (price - SL_Points * RiskRewardRatio * _Point);
 
    double lot = BaseLot;
@@ -1815,6 +1926,17 @@ void LogPositionSummary(string action)
    PrintFormat("%s ポジション数：買い%d / 売り%d / 合計%d", action, buy, sell, total);
 }
 
+string DealReasonToString(long reason)
+{
+   if (reason == DEAL_REASON_EXPERT)
+      return "EA決済/取引";
+   if (reason == DEAL_REASON_SL)
+      return "SL";
+   if (reason == DEAL_REASON_TP)
+      return "TP";
+   return "その他";
+}
+
 //+------------------------------------------------------------------+
 //| TradeTransaction function                                        |
 //+------------------------------------------------------------------+
@@ -1836,6 +1958,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
          AddTradeHistoryTimestamp(TimeCurrent());
          long dealType = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
          long dealEntry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+         long dealReason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+         PrintFormat("Deal成立 deal=%I64u order=%I64u type=%s entry=%s reason=%s price=%.5f volume=%.2f",
+                     trans.deal, trans.order, dealType == DEAL_TYPE_BUY ? "BUY" : "SELL", dealEntry == DEAL_ENTRY_IN ? "IN" : dealEntry == DEAL_ENTRY_OUT ? "OUT" : "その他", DealReasonToString(dealReason), HistoryDealGetDouble(trans.deal, DEAL_PRICE), HistoryDealGetDouble(trans.deal, DEAL_VOLUME));
          if (dealEntry == DEAL_ENTRY_IN)
             LogPositionSummary(dealType == DEAL_TYPE_BUY ? "買い発注しました。" : "売り発注しました。");
          else if (dealEntry == DEAL_ENTRY_OUT)
