@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.19"
+#property version   "3.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -183,6 +183,12 @@ double g_previousBid = 0.0;
 // M1 で判定した決済価格を保持（OnTimer 設定、OnTick で比較）
 double g_closePriceBuy = 0.0;      // BUY ポジションを決済するための基準価格（ASK で比較）
 double g_closePriceSell = 0.0;     // SELL ポジションを決済するための基準価格（BID で比較）
+double g_rangeClosePriceBuy = 0.0;
+double g_rangeClosePriceSell = 0.0;
+double g_trendSuperTrendClosePriceBuy = 0.0;
+double g_trendSuperTrendClosePriceSell = 0.0;
+double g_trendBBMiddleClosePriceBuy = 0.0;
+double g_trendBBMiddleClosePriceSell = 0.0;
 // M1 で判定したエントリー価格（OnTimer 設定、OnTick で比較）
 double g_entryPriceBuy = 0.0;      // BUY エントリ基準価格（ASK で比較）
 double g_entryPriceSell = 0.0;     // SELL エントリ基準価格（BID で比較）
@@ -322,13 +328,23 @@ bool CopyBufferWithRetry(int handle, int buffer, double &values[], const string 
           AreIndicatorValuesValid(values))
       {
          if (name != "")
+         {
+            if (attempt > 0)
+               PrintFormat("指標取得リトライ成功 name=%s 成功試行=%d回目", name, attempt + 1);
             LogArrayValues(name, values);
+         }
          return(true);
       }
       if (attempt < 2)
+      {
+         if (attempt == 0)
+            PrintFormat("指標取得失敗：初回取得失敗、リトライ開始 name=%s handle=%d timeframe=%s", name, handle, EnumToString(timeframe));
+         PrintFormat("指標取得リトライ：%d回目 name=%s", attempt + 1, name);
          Sleep(100);
+      }
    }
    PrintFormat("指標取得失敗 name=%s handle=%d timeframe=%s required=%d copied=%d lastError=%d", name, handle, EnumToString(timeframe), INDICATOR_BARS, copied, GetLastError());
+   PrintFormat("指標取得リトライ失敗 name=%s 最終試行=%d回目", name, 3);
    LogArrayValues(name, values);
    LogInvalidArrayValues(name, values);
    return(false);
@@ -1186,16 +1202,16 @@ public:
       return true;
    }
 
-   void ComputeEntryExit(TrendType h1Type)
+   void ComputeCloseDecision(TrendType h1Type)
    {
       g_closePriceBuy = 0.0;
       g_closePriceSell = 0.0;
-      g_entryPriceBuy = 0.0;
-      g_entryPriceSell = 0.0;
-      g_canEntryBuy = false;
-      g_canEntrySell = false;
-      g_canCloseBuy = false;
-      g_canCloseSell = false;
+      g_rangeClosePriceBuy = 0.0;
+      g_rangeClosePriceSell = 0.0;
+      g_trendSuperTrendClosePriceBuy = 0.0;
+      g_trendSuperTrendClosePriceSell = 0.0;
+      g_trendBBMiddleClosePriceBuy = 0.0;
+      g_trendBBMiddleClosePriceSell = 0.0;
       g_stochasticCloseBuy = false;
       g_stochasticCloseSell = false;
       g_rangeBBCloseBuy = false;
@@ -1204,19 +1220,8 @@ public:
       g_trendSuperTrendCloseSell = false;
       g_trendBBMiddleCloseBuy = false;
       g_trendBBMiddleCloseSell = false;
-      g_pullbackThresholdBuy = 0.0;
-      g_pullbackThresholdSell = 0.0;
-      g_reaccelThresholdBuy = 0.0;
-      g_reaccelThresholdSell = 0.0;
-
-      if (h1Type != TREND_RANGE && h1Type != TREND_UNKNOWN && g_m1AllOk)
-      {
-         double atrValue = (g_atr[1] > 0.0) ? g_atr[1] : 0.0;
-         g_pullbackThresholdBuy = g_superTrend[1] + atrValue * pullbackAtrFactor;
-         g_pullbackThresholdSell = g_superTrend[1] - atrValue * pullbackAtrFactor;
-         g_reaccelThresholdBuy = g_superTrend[1] + atrValue * reaccelAtrFactor;
-         g_reaccelThresholdSell = g_superTrend[1] - atrValue * reaccelAtrFactor;
-      }
+      g_closeBuyOnOrAbove = false;
+      g_closeSellOnOrBelow = false;
 
       bool stochCrossDown = g_stochK[2] > stochOverbought && g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
       bool stochCrossUp = g_stochK[2] < stochOversold && g_stochK[2] <= g_stochD[2] && g_stochK[1] > g_stochD[1];
@@ -1227,14 +1232,64 @@ public:
 
       if (h1Type == TREND_RANGE)
       {
-         g_entryPriceBuy = g_bbLower[1];
-         g_entryPriceSell = g_bbUpper[1];
-         g_closePriceBuy = g_bbUpper[1];
-         g_closePriceSell = g_bbLower[1];
-         g_entryBuyOnOrBelow = true;
-         g_entrySellOnOrAbove = true;
+         g_rangeClosePriceBuy = g_bbUpper[1];
+         g_rangeClosePriceSell = g_bbLower[1];
+         g_closePriceBuy = g_rangeClosePriceBuy;
+         g_closePriceSell = g_rangeClosePriceSell;
+         g_closeBuyOnOrAbove = true;
+         g_closeSellOnOrBelow = true;
+         g_rangeBBCloseBuy = true;
+         g_rangeBBCloseSell = true;
+      }
+      else if (h1Type != TREND_UNKNOWN)
+      {
+         g_trendSuperTrendClosePriceBuy = g_superTrend[1];
+         g_trendSuperTrendClosePriceSell = g_superTrend[1];
+         g_closePriceBuy = g_trendSuperTrendClosePriceBuy;
+         g_closePriceSell = g_trendSuperTrendClosePriceSell;
          g_closeBuyOnOrAbove = false;
          g_closeSellOnOrBelow = false;
+         g_trendSuperTrendCloseBuy = true;
+         g_trendSuperTrendCloseSell = true;
+         g_trendBBMiddleClosePriceBuy = g_bbMiddle[1];
+         g_trendBBMiddleClosePriceSell = g_bbMiddle[1];
+         double close1 = iClose(_Symbol, PERIOD_M1, 1);
+         double close2 = iClose(_Symbol, PERIOD_M1, 2);
+         g_trendBBMiddleCloseBuy = close2 < g_bbMiddle[2] && close1 >= g_bbMiddle[1];
+         g_trendBBMiddleCloseSell = close2 > g_bbMiddle[2] && close1 <= g_bbMiddle[1];
+      }
+   }
+
+   void ComputeEntryExit(TrendType h1Type)
+   {
+      g_entryPriceBuy = 0.0;
+      g_entryPriceSell = 0.0;
+      g_canEntryBuy = false;
+      g_canEntrySell = false;
+      g_canCloseBuy = false;
+      g_canCloseSell = false;
+      g_pullbackThresholdBuy = 0.0;
+      g_pullbackThresholdSell = 0.0;
+      g_reaccelThresholdBuy = 0.0;
+      g_reaccelThresholdSell = 0.0;
+
+      ComputeCloseDecision(h1Type);
+
+      if (h1Type != TREND_RANGE && h1Type != TREND_UNKNOWN && g_m1AllOk)
+      {
+         double atrValue = (g_atr[1] > 0.0) ? g_atr[1] : 0.0;
+         g_pullbackThresholdBuy = g_superTrend[1] + atrValue * pullbackAtrFactor;
+         g_pullbackThresholdSell = g_superTrend[1] - atrValue * pullbackAtrFactor;
+         g_reaccelThresholdBuy = g_superTrend[1] + atrValue * reaccelAtrFactor;
+         g_reaccelThresholdSell = g_superTrend[1] - atrValue * reaccelAtrFactor;
+      }
+
+      if (h1Type == TREND_RANGE)
+      {
+         g_entryPriceBuy = g_bbLower[1];
+         g_entryPriceSell = g_bbUpper[1];
+         g_entryBuyOnOrBelow = true;
+         g_entrySellOnOrAbove = true;
          if (iClose(_Symbol, PERIOD_M1, 1) <= g_bbLower[1])
             g_entryThresholdCrossedBuy = true;
          if (iClose(_Symbol, PERIOD_M1, 1) >= g_bbUpper[1])
@@ -1246,8 +1301,6 @@ public:
       {
          g_entryPriceBuy = 0.0;
          g_entryPriceSell = 0.0;
-         g_closePriceBuy = 0.0;
-         g_closePriceSell = 0.0;
          g_canEntryBuy = false;
          g_canEntrySell = false;
          g_canCloseBuy = false;
@@ -1259,42 +1312,12 @@ public:
          g_entryThresholdCrossedSell = false;
          g_entryPriceBuy = g_superTrend[1];
          g_entryPriceSell = g_superTrend[1];
-         g_closePriceBuy = g_superTrend[1];
-         g_closePriceSell = g_superTrend[1];
          g_entryBuyOnOrBelow = false;
          g_entrySellOnOrAbove = false;
          g_closeBuyOnOrAbove = false;
          g_closeSellOnOrBelow = false;
          g_canEntryBuy = g_superTrendFlipBuy || g_superTrendReaccelBuy || g_TrendStateH == RANGE_TO_TREND;
          g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
-      }
-
-      if (g_stochK[1] > g_stochD[1] && g_stochK[1] > stochOverbought)
-         g_closePriceBuy = g_bbUpper[1];
-      if (g_stochK[1] < g_stochD[1] && g_stochK[1] < stochOversold)
-         g_closePriceSell = g_bbLower[1];
-
-      if (h1Type != TREND_RANGE && h1Type != TREND_UNKNOWN)
-      {
-         double close1 = iClose(_Symbol, PERIOD_M1, 1);
-         double close2 = iClose(_Symbol, PERIOD_M1, 2);
-         g_trendBBMiddleCloseBuy = close2 < g_bbMiddle[2] && close1 >= g_bbMiddle[1];
-         g_trendBBMiddleCloseSell = close2 > g_bbMiddle[2] && close1 <= g_bbMiddle[1];
-      }
-
-      if (h1Type == TREND_RANGE)
-      {
-         g_closeBuyOnOrAbove = true;
-         g_closeSellOnOrBelow = true;
-         g_rangeBBCloseBuy = true;
-         g_rangeBBCloseSell = true;
-      }
-      else
-      {
-         g_closeBuyOnOrAbove = false;
-         g_closeSellOnOrBelow = false;
-         g_trendSuperTrendCloseBuy = h1Type != TREND_UNKNOWN;
-         g_trendSuperTrendCloseSell = h1Type != TREND_UNKNOWN;
       }
 
       if (g_entryPriceBuy <= 0.0)
@@ -1613,6 +1636,9 @@ int OnInit()
 
    // 価格・フラグ変数の初期化
    g_closePriceBuy = g_closePriceSell = 0.0;
+   g_rangeClosePriceBuy = g_rangeClosePriceSell = 0.0;
+   g_trendSuperTrendClosePriceBuy = g_trendSuperTrendClosePriceSell = 0.0;
+   g_trendBBMiddleClosePriceBuy = g_trendBBMiddleClosePriceSell = 0.0;
    g_entryPriceBuy = g_entryPriceSell = 0.0;
    g_canEntryBuy = g_canEntrySell = false;
    g_canCloseBuy = g_canCloseSell = false;
@@ -1929,7 +1955,7 @@ void LogPositionSummary(string action)
 string DealReasonToString(long reason)
 {
    if (reason == DEAL_REASON_EXPERT)
-      return "EA決済/取引";
+      return "EA決済（成行）";
    if (reason == DEAL_REASON_SL)
       return "SL";
    if (reason == DEAL_REASON_TP)
