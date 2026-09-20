@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.23"
+#property version   "3.24"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -1986,6 +1986,27 @@ void OnTick()
    ClosePositions(g_canCloseBuy, POSITION_TYPE_BUY, g_closePriceBuy, BID);
    ClosePositions(g_canCloseSell, POSITION_TYPE_SELL, g_closePriceSell, ASK);
 
+   bool buyCloseSignal = false;
+   bool sellCloseSignal = false;
+   if (g_canCloseBuy && g_closePriceBuy > 0)
+   {
+      bool stochasticCondition = false;
+      bool rangeBBCondition = false;
+      bool trendSuperTrendCondition = false;
+      bool trendBBMiddleCondition = false;
+      EvaluateCloseConditions(true, BID, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
+      buyCloseSignal = rangeBBCondition || trendSuperTrendCondition || stochasticCondition || trendBBMiddleCondition;
+   }
+   if (g_canCloseSell && g_closePriceSell > 0)
+   {
+      bool stochasticCondition = false;
+      bool rangeBBCondition = false;
+      bool trendSuperTrendCondition = false;
+      bool trendBBMiddleCondition = false;
+      EvaluateCloseConditions(false, ASK, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
+      sellCloseSignal = rangeBBCondition || trendSuperTrendCondition || stochasticCondition || trendBBMiddleCondition;
+   }
+
    UpdateTrailingStops();
 
    // 決済後にスプレッド閾値チェック（スプレッドが大きければエントリを中止）
@@ -1997,8 +2018,32 @@ void OnTick()
    }
 
    // エントリ判定は OnTimer で算出した価格・フラグを使用
-   EnterPosition(g_canEntryBuy, POSITION_TYPE_BUY, g_entryPriceBuy, ASK, ASK, BID);
-   EnterPosition(g_canEntrySell, POSITION_TYPE_SELL, g_entryPriceSell, BID, ASK, BID);
+   static datetime lastBuySuppressionLogBar = 0;
+   static datetime lastSellSuppressionLogBar = 0;
+   if (g_canEntryBuy && buyCloseSignal)
+   {
+      if (lastBuySuppressionLogBar != LastM1)
+      {
+         PrintFormat("新規BUY発注抑制：BUY決済シグナル成立");
+         lastBuySuppressionLogBar = LastM1;
+      }
+   }
+   else
+   {
+      EnterPosition(g_canEntryBuy, POSITION_TYPE_BUY, g_entryPriceBuy, ASK, ASK, BID);
+   }
+   if (g_canEntrySell && sellCloseSignal)
+   {
+      if (lastSellSuppressionLogBar != LastM1)
+      {
+         PrintFormat("新規SELL発注抑制：SELL決済シグナル成立");
+         lastSellSuppressionLogBar = LastM1;
+      }
+   }
+   else
+   {
+      EnterPosition(g_canEntrySell, POSITION_TYPE_SELL, g_entryPriceSell, BID, ASK, BID);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -2069,13 +2114,13 @@ void LogInAnalysis(ulong deal, ulong order, long dealType, datetime dealTime)
    bool trendBBMiddleCondition = false;
    double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
-   double macdMain = LogArrayValue(g_m15_macdMainAll, 1);
-   double macdSignal = LogArrayValue(g_m15_macdSigAll, 1);
+   double macdMainValue = LogArrayValue(g_m15_macdMainAll, 1);
+   double macdSignalValue = LogArrayValue(g_m15_macdSigAll, 1);
    PrintFormat("IN解析 deal=%I64u order=%I64u type=%s price=%.5f lot=%.2f time=%s magic=%I64d M1確定足=%s H1確定足=%s M15確定足=%s H1TrendType=%s H1TrendState=%s H1DI方向=%s H1EMA方向=%s M15RSI=%.3f M15MACDMain=%.5f M15MACDSignal=%.5f M15MACDHistogram=%.5f M15MACDCross=%s M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1StochK=%.3f M1StochD=%.3f M1ATR=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s 決済Stochastic=%s 決済RangeBB=%s 決済TrendSuperTrend=%s 決済TrendBB中央線=%s",
                deal, order, isBuy ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), TimeToString(dealTime, TIME_DATE | TIME_SECONDS), MagicNumber,
                TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_H1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_M15, 1), TIME_DATE | TIME_SECONDS),
                TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH), g_H1DiDir > 0 ? "上" : g_H1DiDir < 0 ? "下" : "不明", g_H1EmaDir > 0 ? "上" : g_H1EmaDir < 0 ? "下" : "不明",
-               LogArrayValue(g_m15_rsiArr, 1), macdMain, macdSignal, macdMain - macdSignal, MACDCrossDirToString(g_M15Signal.hasMACDCross ? g_M15Signal.macdCrossDir : 0),
+               LogArrayValue(g_m15_rsiArr, 1), macdMainValue, macdSignalValue, macdMainValue - macdSignalValue, MACDCrossDirToString(g_M15Signal.hasMACDCross ? g_M15Signal.macdCrossDir : 0),
                LogArrayValue(g_bbUpper, 1), LogArrayValue(g_bbMiddle, 1), LogArrayValue(g_bbLower, 1), LogArrayValue(g_stochK, 1), LogArrayValue(g_stochD, 1), LogArrayValue(g_atr, 1), LogArrayValue(g_superTrend, 1), LogSuperTrendDirection(1),
                stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
 }
