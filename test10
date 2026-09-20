@@ -2188,8 +2188,9 @@ void OnTimer()
          g_TrendTypeH = TrendH1.getType();
          g_TrendStateH = TrendH1.getState();
          g_TrendValueH = TrendH1.getValue();
-         PrintFormat("OnTimer: 1時間足更新ができた 時刻=%s ADX=%.3f Type=%s State=%s",
-                     TimeToString(bH1, TIME_DATE | TIME_SECONDS), g_TrendValueH, TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH));
+         PrintFormat("OnTimer: 1時間足更新ができた 時刻=%s Type=%s State=%s",
+                     TimeToString(bH1, TIME_DATE | TIME_SECONDS), TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH));
+         // ADXの取得成功値表示はコメントアウト。
          LastH1 = bH1;
       }
       else
