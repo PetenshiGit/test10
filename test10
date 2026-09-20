@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.20"
+#property version   "3.21"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -331,7 +331,7 @@ bool CopyBufferWithRetry(int handle, int buffer, double &values[], const string 
          {
             if (attempt > 0)
                PrintFormat("指標取得リトライ成功 name=%s 成功試行=%d回目", name, attempt + 1);
-            LogArrayValues(name, values);
+            // LogArrayValues(name, values);
          }
          return(true);
       }
@@ -797,8 +797,8 @@ public:
       g_H1DiDir = diDir;
       g_H1EmaDir = emaDir;
       
-      PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DI：%s EMA：%s Type=%s State=%s",
-         g_h1_adxArr[1], g_h1_adxArr[2], g_h1_adxArr[3], g_h1_dipArr[1], g_h1_dimArr[1], diDiff, g_h1_emaSArr[1], g_h1_emaLArr[1], diDir > 0 ? "上方向" : diDir < 0 ? "下方向" : "方向性なし", emaDir > 0 ? "上方向" : emaDir < 0 ? "下方向" : "方向性なし", TrendTypeToString(m_type), TrendStateToString(m_state));
+      // PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DI：%s EMA：%s Type=%s State=%s",
+      //    g_h1_adxArr[1], g_h1_adxArr[2], g_h1_adxArr[3], g_h1_dipArr[1], g_h1_dimArr[1], diDiff, g_h1_emaSArr[1], g_h1_emaLArr[1], diDir > 0 ? "上方向" : diDir < 0 ? "下方向" : "方向性なし", emaDir > 0 ? "上方向" : emaDir < 0 ? "下方向" : "方向性なし", TrendTypeToString(m_type), TrendStateToString(m_state));
       return(true);
    }
    TrendType getType() const { return(m_type); }
@@ -991,9 +991,9 @@ public:
                      ArrayCopy(g_m1Low, m1Low) == INDICATOR_BARS &&
                      ArrayCopy(g_m1Close, m1Close) == INDICATOR_BARS);
          ArraySetAsSeries(g_m1High, true); ArraySetAsSeries(g_m1Low, true); ArraySetAsSeries(g_m1Close, true);
-         LogPriceValues("M1 High", m1High);
-         LogPriceValues("M1 Low", m1Low);
-         LogPriceValues("M1 Close", m1Close);
+         // LogPriceValues("M1 High", m1High);
+         // LogPriceValues("M1 Low", m1Low);
+         // LogPriceValues("M1 Close", m1Close);
       }
       else
       {
@@ -1223,10 +1223,12 @@ public:
       g_closeBuyOnOrAbove = false;
       g_closeSellOnOrBelow = false;
 
-      bool stochCrossDown = g_stochK[2] > stochOverbought && g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
-      bool stochCrossUp = g_stochK[2] < stochOversold && g_stochK[2] <= g_stochD[2] && g_stochK[1] > g_stochD[1];
-      bool buyOverheatReversal = g_stochK[2] > stochOverbought && g_stochK[1] < g_stochK[2];
-      bool sellOverheatReversal = g_stochK[2] < stochOversold && g_stochK[1] > g_stochK[2];
+      bool stochCrossDown = g_stochK[2] >= stochOverbought && g_stochK[1] < stochOverbought &&
+                            g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
+      bool stochCrossUp = g_stochK[2] <= stochOversold && g_stochK[1] > stochOversold &&
+                          g_stochK[2] <= g_stochD[2] && g_stochK[1] > g_stochD[1];
+      bool buyOverheatReversal = g_stochK[2] >= stochOverbought && g_stochK[1] < stochOverbought;
+      bool sellOverheatReversal = g_stochK[2] <= stochOversold && g_stochK[1] > stochOversold;
       g_stochasticCloseBuy = stochCrossDown || buyOverheatReversal;
       g_stochasticCloseSell = stochCrossUp || sellOverheatReversal;
 
@@ -1918,8 +1920,8 @@ void OnTick()
    // 決済後にスプレッド閾値チェック（スプレッドが大きければエントリを中止）
    if (spreadPts >= MaxAllowedSpread)
    {
-      PrintFormat("スプレッドが閾値を超えたため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント 閾値=%dポイント",
-                  ASK, BID, spreadPts, MaxAllowedSpread);
+      // PrintFormat("スプレッドが閾値を超えたため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント 閾値=%dポイント",
+      //             ASK, BID, spreadPts, MaxAllowedSpread);
       return;
    }
 
