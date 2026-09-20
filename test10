@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.20"
+#property version   "3.21"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -226,6 +226,45 @@ bool g_h1AllOk = false;      // H1 の指標が直近で全て取得成功して
 bool g_m15AllOk = false;     // M15 の指標が直近で全て取得成功しているか
 bool g_m1AllOk = false;      // M1 の指標が直近で全て取得成功しているか
 
+// CopyBufferWithRetry が3回とも失敗した指標名を保持。
+// 次回OnTimer（1秒後）の再取得で成功した場合に、その成功だけをログ表示する。
+string g_retryPendingNames[32];
+int g_retryPendingCount = 0;
+
+bool IsRetryPendingName(const string name)
+{
+   for (int i = 0; i < g_retryPendingCount; i++)
+      if (g_retryPendingNames[i] == name)
+         return true;
+   return false;
+}
+
+void AddRetryPendingName(const string name)
+{
+   if (name == "" || IsRetryPendingName(name))
+      return;
+   if (g_retryPendingCount < ArraySize(g_retryPendingNames))
+   {
+      g_retryPendingNames[g_retryPendingCount] = name;
+      g_retryPendingCount++;
+   }
+}
+
+void RemoveRetryPendingName(const string name)
+{
+   for (int i = 0; i < g_retryPendingCount; i++)
+   {
+      if (g_retryPendingNames[i] == name)
+      {
+         for (int j = i; j < g_retryPendingCount - 1; j++)
+            g_retryPendingNames[j] = g_retryPendingNames[j + 1];
+         g_retryPendingCount--;
+         g_retryPendingNames[g_retryPendingCount] = "";
+         return;
+      }
+   }
+}
+
 // --- 各指標ごとの取得成功フラグと直近成功時の値キャッシュ ---
 // H1 指標（配列は series 形式で保存）
 bool g_h1_adx_ok = false, g_h1_dip_ok = false, g_h1_dim_ok = false, g_h1_emaS_ok = false, g_h1_emaL_ok = false;
@@ -330,8 +369,16 @@ bool CopyBufferWithRetry(int handle, int buffer, double &values[], const string 
          if (name != "")
          {
             if (attempt > 0)
+            {
                PrintFormat("指標取得リトライ成功 name=%s 成功試行=%d回目", name, attempt + 1);
-            LogArrayValues(name, values);
+               LogArrayValues(name, values);
+            }
+            else if (IsRetryPendingName(name))
+            {
+               PrintFormat("指標再取得成功 name=%s 前回3回失敗後の再試行で成功", name);
+               LogArrayValues(name, values);
+            }
+            RemoveRetryPendingName(name);
          }
          return(true);
       }
@@ -347,6 +394,7 @@ bool CopyBufferWithRetry(int handle, int buffer, double &values[], const string 
    PrintFormat("指標取得リトライ失敗 name=%s 最終試行=%d回目", name, 3);
    LogArrayValues(name, values);
    LogInvalidArrayValues(name, values);
+   AddRetryPendingName(name);
    return(false);
 }
 
@@ -797,8 +845,8 @@ public:
       g_H1DiDir = diDir;
       g_H1EmaDir = emaDir;
       
-      PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DI：%s EMA：%s Type=%s State=%s",
-         g_h1_adxArr[1], g_h1_adxArr[2], g_h1_adxArr[3], g_h1_dipArr[1], g_h1_dimArr[1], diDiff, g_h1_emaSArr[1], g_h1_emaLArr[1], diDir > 0 ? "上方向" : diDir < 0 ? "下方向" : "方向性なし", emaDir > 0 ? "上方向" : emaDir < 0 ? "下方向" : "方向性なし", TrendTypeToString(m_type), TrendStateToString(m_state));
+      // PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DI：%s EMA：%s Type=%s State=%s",
+      //    g_h1_adxArr[1], g_h1_adxArr[2], g_h1_adxArr[3], g_h1_dipArr[1], g_h1_dimArr[1], diDiff, g_h1_emaSArr[1], g_h1_emaLArr[1], diDir > 0 ? "上方向" : diDir < 0 ? "下方向" : "方向性なし", emaDir > 0 ? "上方向" : emaDir < 0 ? "下方向" : "方向性なし", TrendTypeToString(m_type), TrendStateToString(m_state));
       return(true);
    }
    TrendType getType() const { return(m_type); }
@@ -900,8 +948,8 @@ public:
       g_M15Signal.macdCrossDir = m_macdCrossDir;
       g_M15Signal.pendingNextM1 = true;
 
-      PrintFormat("M15更新 RSI=%.3f MACD Main=%.5f Signal=%.5f Hist=%.5f Cross=%s",
-                  latestRsi, latestMacdMain, latestMacdSig, latestMacdHist, m_macdCross ? "YES" : "NO");
+      // PrintFormat("M15更新 RSI=%.3f MACD Main=%.5f Signal=%.5f Hist=%.5f Cross=%s",
+      //             latestRsi, latestMacdMain, latestMacdSig, latestMacdHist, m_macdCross ? "YES" : "NO");
       return(true);
    }
    TrendState getState() const { return (m_state); }
@@ -991,9 +1039,9 @@ public:
                      ArrayCopy(g_m1Low, m1Low) == INDICATOR_BARS &&
                      ArrayCopy(g_m1Close, m1Close) == INDICATOR_BARS);
          ArraySetAsSeries(g_m1High, true); ArraySetAsSeries(g_m1Low, true); ArraySetAsSeries(g_m1Close, true);
-         LogPriceValues("M1 High", m1High);
-         LogPriceValues("M1 Low", m1Low);
-         LogPriceValues("M1 Close", m1Close);
+         // LogPriceValues("M1 High", m1High);
+         // LogPriceValues("M1 Low", m1Low);
+         // LogPriceValues("M1 Close", m1Close);
       }
       else
       {
@@ -1035,8 +1083,8 @@ public:
       g_superTrendPullbackBuy = false;
       g_superTrendPullbackSell = false;
 
-      PrintFormat("M1確定値 ATR=%.5f BB上=%.5f BB中=%.5f BB下=%.5f StochK=%.3f StochD=%.3f", g_atr[1], g_bbUpper[1], g_bbMiddle[1], g_bbLower[1], g_stochK[1], g_stochD[1]);
-      PrintFormat("M1 SuperTrend更新値=%.5f 方向=%s", g_superTrend[1], g_superTrendDir[1] > 0 ? "上" : "下");
+      // PrintFormat("M1確定値 ATR=%.5f BB上=%.5f BB中=%.5f BB下=%.5f StochK=%.3f StochD=%.3f", g_atr[1], g_bbUpper[1], g_bbMiddle[1], g_bbLower[1], g_stochK[1], g_stochD[1]);
+      // PrintFormat("M1 SuperTrend更新値=%.5f 方向=%s", g_superTrend[1], g_superTrendDir[1] > 0 ? "上" : "下");
       return(true);
    }
 
@@ -1223,10 +1271,12 @@ public:
       g_closeBuyOnOrAbove = false;
       g_closeSellOnOrBelow = false;
 
-      bool stochCrossDown = g_stochK[2] > stochOverbought && g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
-      bool stochCrossUp = g_stochK[2] < stochOversold && g_stochK[2] <= g_stochD[2] && g_stochK[1] > g_stochD[1];
-      bool buyOverheatReversal = g_stochK[2] > stochOverbought && g_stochK[1] < g_stochK[2];
-      bool sellOverheatReversal = g_stochK[2] < stochOversold && g_stochK[1] > g_stochK[2];
+      bool stochCrossDown = g_stochK[2] >= stochOverbought && g_stochK[1] < stochOverbought &&
+                            g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
+      bool stochCrossUp = g_stochK[2] <= stochOversold && g_stochK[1] > stochOversold &&
+                          g_stochK[2] <= g_stochD[2] && g_stochK[1] > g_stochD[1];
+      bool buyOverheatReversal = g_stochK[2] >= stochOverbought && g_stochK[1] < stochOverbought;
+      bool sellOverheatReversal = g_stochK[2] <= stochOversold && g_stochK[1] > stochOversold;
       g_stochasticCloseBuy = stochCrossDown || buyOverheatReversal;
       g_stochasticCloseSell = stochCrossUp || sellOverheatReversal;
 
@@ -1918,8 +1968,8 @@ void OnTick()
    // 決済後にスプレッド閾値チェック（スプレッドが大きければエントリを中止）
    if (spreadPts >= MaxAllowedSpread)
    {
-      PrintFormat("スプレッドが閾値を超えたため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント 閾値=%dポイント",
-                  ASK, BID, spreadPts, MaxAllowedSpread);
+      // PrintFormat("スプレッドが閾値を超えたため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント 閾値=%dポイント",
+      //             ASK, BID, spreadPts, MaxAllowedSpread);
       return;
    }
 
