@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.24"
+#property version   "3.25"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -35,12 +35,15 @@ input bool EnableTrendSuperTrendClose = true; // トレンドSuperTrend決済
 input bool EnableTrendBBMiddleClose = true; // トレンドBB中央線緊急決済
 input bool EnableRangeTP            = true;  // レンジTP
 input bool EnableStopLoss           = true;  // 保護用SL
+input bool EnableEntryOnCloseSignal = true; // 決済シグナルと新規エントリーシグナルが同時成立した場合にエントリーを許可
 
 // ===================================================================
 // 内部パラメータ（input にはしない）
 // ===================================================================
 int maxPositionsNormal = 1;         // 通常時の同一方向最大ポジション数
 int maxPositionsPyramid = 3;        // 追撃を含めた同一方向の最終最大ポジション数
+int NewEntryStopBeforeClose = 3 * 60 * 60;
+int ForceCloseBeforeClose = 10 * 60;
 
 int adxPeriod = 14;                 // ADX周期
 int adxThreshold = 25;              // ADX弱トレンド判定閾値
@@ -267,9 +270,18 @@ struct SEntryLogRecord
    ulong positionId;                // 個別ポジション識別子
    ulong inDeal;                    // IN約定Deal番号
    datetime inTime;                 // IN約定時刻
-   ulong inMilliseconds;            // INイベント時の経過ミリ秒カウンタ
+   long inTimeMsc;                  // IN約定時刻（ミリ秒）
 };
 SEntryLogRecord g_entryLogRecords[]; // ポジションごとのIN記録（OUT経過時間用）
+
+bool g_weekendEntryStopped = false;
+bool g_weekendForceCloseActive = false;
+bool g_weekendTargetValid = false;
+bool g_weekendScheduleInitialized = false;
+datetime g_weekendSessionEnd = 0;
+datetime g_weekendNextSessionStart = 0;
+datetime g_weekendEntryStopTime = 0;
+datetime g_weekendForceCloseTime = 0;
 
 // ===================================================================
 // 取引リクエスト履歴
@@ -1581,6 +1593,178 @@ void UpdateTrailingStops()
    }
 }
 
+datetime ServerDayStart(datetime value)
+{
+   MqlDateTime parts;
+   TimeToStruct(value, parts);
+   parts.hour = 0;
+   parts.min = 0;
+   parts.sec = 0;
+   return StructToTime(parts);
+}
+
+long SessionSeconds(datetime value)
+{
+   long seconds = (long)value % 86400;
+   if (seconds < 0)
+      seconds += 86400;
+   return seconds;
+}
+
+bool FindWeekendSession(datetime now, datetime &sessionEnd, datetime &nextSessionStart, long &gapSeconds)
+{
+   datetime today = ServerDayStart(now);
+   datetime currentEnd = 0;
+   datetime previousSessionEnd = 0;
+   datetime candidateNextStart = 0;
+   bool hasCurrentSession = false;
+
+   for (int dayOffset = -1; dayOffset <= 8; dayOffset++)
+   {
+      datetime dayStart = today + dayOffset * 86400;
+      MqlDateTime dayParts;
+      TimeToStruct(dayStart, dayParts);
+      for (uint sessionIndex = 0; ; sessionIndex++)
+      {
+         datetime from = 0;
+         datetime to = 0;
+         if (!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dayParts.day_of_week, sessionIndex, from, to))
+            break;
+
+         long fromSeconds = SessionSeconds(from);
+         long toSeconds = SessionSeconds(to);
+         datetime start = dayStart + fromSeconds;
+         datetime end = 0;
+         if (fromSeconds == 0 && toSeconds == 0)
+            end = start + 86400;
+         else
+         {
+            end = dayStart + toSeconds;
+            if (end <= start)
+               end += 86400;
+         }
+
+         if (end <= now && end > previousSessionEnd)
+            previousSessionEnd = end;
+
+         if (now >= start && now < end && (!hasCurrentSession || end < currentEnd))
+         {
+            currentEnd = end;
+            hasCurrentSession = true;
+         }
+      }
+   }
+
+   if (!hasCurrentSession)
+      currentEnd = previousSessionEnd;
+   if (currentEnd == 0)
+      return false;
+
+   for (int dayOffset = -1; dayOffset <= 8; dayOffset++)
+   {
+      datetime dayStart = today + dayOffset * 86400;
+      MqlDateTime dayParts;
+      TimeToStruct(dayStart, dayParts);
+      for (uint sessionIndex = 0; ; sessionIndex++)
+      {
+         datetime from = 0;
+         datetime to = 0;
+         if (!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dayParts.day_of_week, sessionIndex, from, to))
+            break;
+
+         datetime start = dayStart + SessionSeconds(from);
+         if (start > currentEnd && (candidateNextStart == 0 || start < candidateNextStart))
+            candidateNextStart = start;
+      }
+   }
+
+   if (candidateNextStart == 0)
+      return false;
+   sessionEnd = currentEnd;
+   nextSessionStart = candidateNextStart;
+   gapSeconds = (long)(candidateNextStart - currentEnd);
+   return true;
+}
+
+void UpdateWeekendSessionSchedule(datetime now)
+{
+   if (g_weekendTargetValid && now < g_weekendNextSessionStart)
+      return;
+
+   datetime sessionEnd = 0;
+   datetime nextSessionStart = 0;
+   long gapSeconds = 0;
+   if (!FindWeekendSession(now, sessionEnd, nextSessionStart, gapSeconds))
+      return;
+
+   g_weekendScheduleInitialized = true;
+
+   bool isWeekendTarget = gapSeconds >= 24 * 60 * 60;
+   if (!isWeekendTarget)
+   {
+      g_weekendTargetValid = false;
+      return;
+   }
+
+   datetime stopTime = sessionEnd - NewEntryStopBeforeClose;
+   datetime forceTime = sessionEnd - ForceCloseBeforeClose;
+   bool changed = !g_weekendTargetValid || g_weekendSessionEnd != sessionEnd || g_weekendNextSessionStart != nextSessionStart;
+   g_weekendTargetValid = true;
+   g_weekendSessionEnd = sessionEnd;
+   g_weekendNextSessionStart = nextSessionStart;
+   g_weekendEntryStopTime = stopTime;
+   g_weekendForceCloseTime = forceTime;
+   if (changed)
+   {
+      PrintFormat("週末休場判定：対象 現在セッション終了=%s 次回セッション開始=%s 休場時間=%I64d秒 24時間以上=true 新規発注停止=%s 強制決済=%s",
+                  TimeToString(sessionEnd, TIME_DATE | TIME_SECONDS), TimeToString(nextSessionStart, TIME_DATE | TIME_SECONDS), gapSeconds,
+                  TimeToString(stopTime, TIME_DATE | TIME_SECONDS), TimeToString(forceTime, TIME_DATE | TIME_SECONDS));
+   }
+}
+
+void ForceCloseWeekendPositions()
+{
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(ticket))
+         continue;
+      if (PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      ClosePositionByTicket(ticket, "週末休場前の強制決済");
+   }
+}
+
+void ProcessWeekendSession(datetime now, bool refreshSchedule)
+{
+   if (g_weekendTargetValid && now >= g_weekendNextSessionStart)
+   {
+      g_weekendTargetValid = false;
+      g_weekendEntryStopped = false;
+      g_weekendForceCloseActive = false;
+      PrintFormat("週末停止解除：次回セッション開始=%s", TimeToString(now, TIME_DATE | TIME_SECONDS));
+      UpdateWeekendSessionSchedule(now);
+   }
+
+   if (refreshSchedule || !g_weekendScheduleInitialized)
+      UpdateWeekendSessionSchedule(now);
+   if (!g_weekendTargetValid)
+      return;
+
+   if (now >= g_weekendEntryStopTime && !g_weekendEntryStopped)
+   {
+      g_weekendEntryStopped = true;
+      PrintFormat("週末新規発注停止：時刻=%s", TimeToString(now, TIME_DATE | TIME_SECONDS));
+   }
+   if (now >= g_weekendForceCloseTime && !g_weekendForceCloseActive)
+   {
+      g_weekendEntryStopped = true;
+      g_weekendForceCloseActive = true;
+      PrintFormat("週末強制全決済開始：時刻=%s", TimeToString(now, TIME_DATE | TIME_SECONDS));
+      ForceCloseWeekendPositions();
+   }
+}
+
 // ===================================================================
 // メイン関数軍
 //+------------------------------------------------------------------+
@@ -1667,6 +1851,10 @@ int OnInit()
    g_trendSuperTrendCloseBuy = g_trendSuperTrendCloseSell = false;
    g_trendBBMiddleCloseBuy = g_trendBBMiddleCloseSell = false;
    g_closeAnalysisMaskBuy = g_closeAnalysisMaskSell = -1;
+   g_weekendEntryStopped = false;
+   g_weekendForceCloseActive = false;
+   g_weekendTargetValid = false;
+   g_weekendScheduleInitialized = false;
 
    // M15 signal 初期化
    g_M15Signal.barTime = 0;
@@ -1843,6 +2031,8 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
 // ===================================================================
 void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice, double currentPrice, double ask, double bid)
 {
+   if (g_weekendEntryStopped)
+      return;
    if (!canEntry || entryPrice <= 0 || g_TrendTypeH == TREND_UNKNOWN || !g_h1AllOk || !g_m15AllOk || !g_m1AllOk)
       return;
    if (!IsIndicatorValueValid(entryPrice) || !IsIndicatorValueValid(ask) || !IsIndicatorValueValid(bid))
@@ -1954,6 +2144,9 @@ void OnTick()
       return;
    }
 
+   if (g_weekendForceCloseActive)
+      return;
+
    // BuyCount/SellCount の判定をg_closePrice 判定より前に移動
    NowPositions = 0;
    BuyCount = 0;
@@ -2020,7 +2213,7 @@ void OnTick()
    // エントリ判定は OnTimer で算出した価格・フラグを使用
    static datetime lastBuySuppressionLogBar = 0;
    static datetime lastSellSuppressionLogBar = 0;
-   if (g_canEntryBuy && buyCloseSignal)
+   if (g_canEntryBuy && !EnableEntryOnCloseSignal && buyCloseSignal)
    {
       if (lastBuySuppressionLogBar != LastM1)
       {
@@ -2032,7 +2225,7 @@ void OnTick()
    {
       EnterPosition(g_canEntryBuy, POSITION_TYPE_BUY, g_entryPriceBuy, ASK, ASK, BID);
    }
-   if (g_canEntrySell && sellCloseSignal)
+   if (g_canEntrySell && !EnableEntryOnCloseSignal && sellCloseSignal)
    {
       if (lastSellSuppressionLogBar != LastM1)
       {
@@ -2081,24 +2274,24 @@ string DealReasonToString(long reason)
    return "その他";
 }
 
-void SaveEntryLogRecord(ulong positionId, ulong inDeal, datetime inTime)
+void SaveEntryLogRecord(ulong positionId, ulong inDeal, datetime inTime, long inTimeMsc)
 {
    int size = ArraySize(g_entryLogRecords);
    ArrayResize(g_entryLogRecords, size + 1);
    g_entryLogRecords[size].positionId = positionId;
    g_entryLogRecords[size].inDeal = inDeal;
    g_entryLogRecords[size].inTime = inTime;
-   g_entryLogRecords[size].inMilliseconds = GetTickCount64();
+   g_entryLogRecords[size].inTimeMsc = inTimeMsc;
 }
 
-bool FindEntryLogRecord(ulong positionId, datetime &inTime, ulong &inMilliseconds)
+bool FindEntryLogRecord(ulong positionId, datetime &inTime, long &inTimeMsc)
 {
    for (int i = ArraySize(g_entryLogRecords) - 1; i >= 0; i--)
    {
       if (g_entryLogRecords[i].positionId == positionId)
       {
          inTime = g_entryLogRecords[i].inTime;
-         inMilliseconds = g_entryLogRecords[i].inMilliseconds;
+         inTimeMsc = g_entryLogRecords[i].inTimeMsc;
          return true;
       }
    }
@@ -2107,6 +2300,11 @@ bool FindEntryLogRecord(ulong positionId, datetime &inTime, ulong &inMillisecond
 
 void LogInAnalysis(ulong deal, ulong order, long dealType, datetime dealTime)
 {
+   if (!HistoryDealSelect(deal))
+   {
+      PrintFormat("IN解析中止：Deal選択失敗 deal=%I64u error=%d", deal, GetLastError());
+      return;
+   }
    bool isBuy = dealType == DEAL_TYPE_BUY;
    bool stochasticCondition = false;
    bool rangeBBCondition = false;
@@ -2116,8 +2314,8 @@ void LogInAnalysis(ulong deal, ulong order, long dealType, datetime dealTime)
    EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
    double macdMainValue = LogArrayValue(g_m15_macdMainAll, 1);
    double macdSignalValue = LogArrayValue(g_m15_macdSigAll, 1);
-   PrintFormat("IN解析 deal=%I64u order=%I64u type=%s price=%.5f lot=%.2f time=%s magic=%I64d M1確定足=%s H1確定足=%s M15確定足=%s H1TrendType=%s H1TrendState=%s H1DI方向=%s H1EMA方向=%s M15RSI=%.3f M15MACDMain=%.5f M15MACDSignal=%.5f M15MACDHistogram=%.5f M15MACDCross=%s M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1StochK=%.3f M1StochD=%.3f M1ATR=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s 決済Stochastic=%s 決済RangeBB=%s 決済TrendSuperTrend=%s 決済TrendBB中央線=%s",
-               deal, order, isBuy ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), TimeToString(dealTime, TIME_DATE | TIME_SECONDS), MagicNumber,
+   PrintFormat("IN解析 deal=%I64u order=%I64u type=%s price=%.5f lot=%.2f time=%s time_msc=%I64d magic=%I64d position=%I64u symbol=%s M1確定足=%s H1確定足=%s M15確定足=%s H1TrendType=%s H1TrendState=%s H1DI方向=%s H1EMA方向=%s M15RSI=%.3f M15MACDMain=%.5f M15MACDSignal=%.5f M15MACDHistogram=%.5f M15MACDCross=%s M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1StochK=%.3f M1StochD=%.3f M1ATR=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s 決済Stochastic=%s 決済RangeBB=%s 決済TrendSuperTrend=%s 決済TrendBB中央線=%s",
+               deal, order, isBuy ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), TimeToString(dealTime, TIME_DATE | TIME_SECONDS), HistoryDealGetInteger(deal, DEAL_TIME_MSC), HistoryDealGetInteger(deal, DEAL_MAGIC), HistoryDealGetInteger(deal, DEAL_POSITION_ID), HistoryDealGetString(deal, DEAL_SYMBOL),
                TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_H1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_M15, 1), TIME_DATE | TIME_SECONDS),
                TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH), g_H1DiDir > 0 ? "上" : g_H1DiDir < 0 ? "下" : "不明", g_H1EmaDir > 0 ? "上" : g_H1EmaDir < 0 ? "下" : "不明",
                LogArrayValue(g_m15_rsiArr, 1), macdMainValue, macdSignalValue, macdMainValue - macdSignalValue, MACDCrossDirToString(g_M15Signal.hasMACDCross ? g_M15Signal.macdCrossDir : 0),
@@ -2127,12 +2325,18 @@ void LogInAnalysis(ulong deal, ulong order, long dealType, datetime dealTime)
 
 void LogOutAnalysis(ulong deal, ulong order, long positionType, long dealReason, datetime dealTime, ulong positionId)
 {
+   if (!HistoryDealSelect(deal))
+   {
+      PrintFormat("OUT解析中止：Deal選択失敗 deal=%I64u error=%d", deal, GetLastError());
+      return;
+   }
    datetime inTime = 0;
-   ulong inMilliseconds = 0;
-   bool hasEntry = FindEntryLogRecord(positionId, inTime, inMilliseconds);
-   double elapsed = hasEntry ? (GetTickCount64() - inMilliseconds) / 1000.0 : -1.0;
-   PrintFormat("OUT解析 deal=%I64u order=%I64u position=%I64u type=%s price=%.5f lot=%.2f reason=%s time=%s INからOUTまで=%s M1確定足=%s H1確定足=%s H1TrendType=%s H1TrendState=%s M15RSI=%.3f M1StochK=%.3f M1StochD=%.3f M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s",
-               deal, order, positionId, positionType == POSITION_TYPE_BUY ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), DealReasonToString(dealReason), TimeToString(dealTime, TIME_DATE | TIME_SECONDS),
+   long inTimeMsc = 0;
+   bool hasEntry = FindEntryLogRecord(positionId, inTime, inTimeMsc);
+   long outTimeMsc = HistoryDealGetInteger(deal, DEAL_TIME_MSC);
+   double elapsed = hasEntry && outTimeMsc >= inTimeMsc ? (outTimeMsc - inTimeMsc) / 1000.0 : -1.0;
+   PrintFormat("OUT解析 deal=%I64u order=%I64u position=%I64u type=%s price=%.5f lot=%.2f reason=%s time=%s time_msc=%I64d magic=%I64d symbol=%s INからOUTまで=%s M1確定足=%s H1確定足=%s H1TrendType=%s H1TrendState=%s M15RSI=%.3f M1StochK=%.3f M1StochD=%.3f M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s",
+               deal, order, positionId, positionType == POSITION_TYPE_BUY ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), DealReasonToString(dealReason), TimeToString(dealTime, TIME_DATE | TIME_SECONDS), outTimeMsc, HistoryDealGetInteger(deal, DEAL_MAGIC), HistoryDealGetString(deal, DEAL_SYMBOL),
                hasEntry ? DoubleToString(elapsed, 1) + "秒" : "不明", TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_H1, 1), TIME_DATE | TIME_SECONDS),
                TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH), LogArrayValue(g_m15_rsiArr, 1), LogArrayValue(g_stochK, 1), LogArrayValue(g_stochD, 1),
                LogArrayValue(g_bbUpper, 1), LogArrayValue(g_bbMiddle, 1), LogArrayValue(g_bbLower, 1), LogArrayValue(g_superTrend, 1), LogSuperTrendDirection(1));
@@ -2157,29 +2361,36 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       case TRADE_TRANSACTION_DEAL_ADD:
       {
          AddTradeHistoryTimestamp(TimeCurrent());
+         ResetLastError();
+         if (!HistoryDealSelect(trans.deal))
+         {
+            PrintFormat("Deal情報取得中止：Deal選択失敗 deal=%I64u error=%d", trans.deal, GetLastError());
+            break;
+         }
          long dealType = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
          long dealEntry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
          long dealReason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+         long dealTimeMsc = HistoryDealGetInteger(trans.deal, DEAL_TIME_MSC);
+         ulong dealOrder = (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER);
+         ulong dealPosition = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+         if (dealOrder == 0)
+            dealOrder = trans.order;
+         if (dealPosition == 0)
+            dealPosition = trans.position;
          PrintFormat("Deal成立 deal=%I64u order=%I64u type=%s entry=%s reason=%s price=%.5f volume=%.2f",
-                     trans.deal, trans.order, dealType == DEAL_TYPE_BUY ? "BUY" : "SELL", dealEntry == DEAL_ENTRY_IN ? "IN" : dealEntry == DEAL_ENTRY_OUT ? "OUT" : "その他", DealReasonToString(dealReason), HistoryDealGetDouble(trans.deal, DEAL_PRICE), HistoryDealGetDouble(trans.deal, DEAL_VOLUME));
+                     trans.deal, dealOrder, dealType == DEAL_TYPE_BUY ? "BUY" : "SELL", dealEntry == DEAL_ENTRY_IN ? "IN" : dealEntry == DEAL_ENTRY_OUT ? "OUT" : dealEntry == DEAL_ENTRY_INOUT ? "INOUT" : dealEntry == DEAL_ENTRY_OUT_BY ? "OUT_BY" : "その他", DealReasonToString(dealReason), HistoryDealGetDouble(trans.deal, DEAL_PRICE), HistoryDealGetDouble(trans.deal, DEAL_VOLUME));
          if (dealEntry == DEAL_ENTRY_IN)
          {
             datetime inTime = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
-            ulong positionId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-            if (positionId == 0)
-               positionId = trans.position;
-            SaveEntryLogRecord(positionId, trans.deal, inTime);
-            LogInAnalysis(trans.deal, trans.order, dealType, inTime);
+            SaveEntryLogRecord(dealPosition, trans.deal, inTime, dealTimeMsc);
+            LogInAnalysis(trans.deal, dealOrder, dealType, inTime);
             LogPositionSummary(dealType == DEAL_TYPE_BUY ? "買い発注しました。" : "売り発注しました。");
          }
          else if (dealEntry == DEAL_ENTRY_OUT)
          {
             long positionType = dealType == DEAL_TYPE_SELL ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
             datetime outTime = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
-            ulong positionId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-            if (positionId == 0)
-               positionId = trans.position;
-            LogOutAnalysis(trans.deal, trans.order, positionType, dealReason, outTime, positionId);
+            LogOutAnalysis(trans.deal, dealOrder, positionType, dealReason, outTime, dealPosition);
             LogPositionSummary(dealType == DEAL_TYPE_SELL ? "買い決済しました。" : "売り決済しました。");
          }
          else
@@ -2278,6 +2489,7 @@ void OnTimer()
    datetime bM1 = iTime(_Symbol, PERIOD_M1, 0);
    datetime bM15 = iTime(_Symbol, PERIOD_M15, 0);
    datetime bH1 = iTime(_Symbol, PERIOD_H1, 0);
+   bool h1Updated = false;
 
    bool newM1Bar = bM1 != LastM1;
 
@@ -2333,6 +2545,7 @@ void OnTimer()
                      TimeToString(bH1, TIME_DATE | TIME_SECONDS), TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH));
          // ADXの取得成功値表示はコメントアウト。
          LastH1 = bH1;
+         h1Updated = true;
       }
       else
       {
@@ -2349,4 +2562,6 @@ void OnTimer()
    // M1判定が完了した後に失効させ、同じ足の追撃判定では利用できるようにする。
    if (newM1Bar && g_M15Signal.pendingNextM1 && bM1 >= g_M15Signal.expireM1BarTime)
       g_M15Signal.pendingNextM1 = false;
+
+   ProcessWeekendSession(TimeCurrent(), h1Updated);
 }
