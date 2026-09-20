@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.21"
+#property version   "3.23"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -142,8 +142,12 @@ enum DivergenceType
 // ===================================================================
 // グローバル変数とオブジェクトの定義
 // ===================================================================
-datetime LastH1 = 0, LastM15 = 0, LastM1 = 0;
-int NowPositions = 0, BuyCount = 0, SellCount = 0;
+datetime LastH1 = 0;                 // H1の現在形成中バー時刻（更新判定用）
+datetime LastM15 = 0;                // M15の現在形成中バー時刻（更新判定用）
+datetime LastM1 = 0;                 // M1の現在形成中バー時刻（更新判定用）
+int NowPositions = 0;                // EA管理対象ポジションの合計数
+int BuyCount = 0;                   // EA管理対象BUYポジション数
+int SellCount = 0;                  // EA管理対象SELLポジション数
 
 // ===================================================================
 // 判定結果をグローバル enum として保持（H1/M15）
@@ -152,46 +156,47 @@ TrendType      g_TrendTypeH = TREND_UNKNOWN;      // H1トレンドの種別
 TrendState     g_TrendStateH = STATE_UNKNOWN;     // H1トレンドの状態
 double         g_TrendValueH = 0.0;               // H1トレンド値（ADXなど）
 
-int g_H1DiDir = 0;                // H1 DI 方向（1=UP, -1=DOWN, 0=UNKNOWN）
-int g_H1EmaDir = 0;               // H1 EMA 方向（1=UP, -1=DOWN, 0=UNKNOWN）
+int g_H1DiDir = 0;                // H1 DI方向（1=上、-1=下、0=不明）
+int g_H1EmaDir = 0;               // H1 EMA方向（1=上、-1=下、0=不明）
 
-datetime g_lastBuyEntryBarTime = 0;   // 同一方向 BUY 発注の直近 M1 確定バー時刻
-datetime g_lastSellEntryBarTime = 0;  // 同一方向 SELL 発注の直近 M1 確定バー時刻
-datetime g_lastBuyCloseBarTime = 0;
-datetime g_lastSellCloseBarTime = 0;
-bool g_superTrendInitialized = false;
-double g_superTrendLast = EMPTY_VALUE;
-double g_superTrendFinalUpper = EMPTY_VALUE;
-double g_superTrendFinalLower = EMPTY_VALUE;
-int g_superTrendLastDir = 0;
-double g_pullbackThresholdBuy = 0.0;
-double g_pullbackThresholdSell = 0.0;
-double g_reaccelThresholdBuy = 0.0;
-double g_reaccelThresholdSell = 0.0;
-bool g_superTrendPullbackBuy = false;
-bool g_superTrendPullbackSell = false;
-bool g_superTrendReaccelBuy = false;
-bool g_superTrendReaccelSell = false;
-bool g_superTrendFlipBuy = false;
-bool g_superTrendFlipSell = false;
-double g_previousAsk = 0.0;
-double g_previousBid = 0.0;
+datetime g_lastBuyEntryBarTime = 0;   // BUYの直近エントリーに使用したM1確定バー時刻
+datetime g_lastSellEntryBarTime = 0;  // SELLの直近エントリーに使用したM1確定バー時刻
+datetime g_lastBuyCloseBarTime = 0;   // BUY決済を実行した直近M1バー時刻
+datetime g_lastSellCloseBarTime = 0;  // SELL決済を実行した直近M1バー時刻
+bool g_superTrendInitialized = false; // SuperTrendの初期計算完了フラグ
+double g_superTrendLast = EMPTY_VALUE; // 直近計算済みSuperTrend値
+double g_superTrendFinalUpper = EMPTY_VALUE; // SuperTrend最終Upper Band
+double g_superTrendFinalLower = EMPTY_VALUE; // SuperTrend最終Lower Band
+int g_superTrendLastDir = 0;         // 直近SuperTrend方向（1=上、-1=下）
+double g_pullbackThresholdBuy = 0.0; // BUY Pullback判定ライン
+double g_pullbackThresholdSell = 0.0; // SELL Pullback判定ライン
+double g_reaccelThresholdBuy = 0.0;  // BUY Reacceleration判定ライン
+double g_reaccelThresholdSell = 0.0; // SELL Reacceleration判定ライン
+bool g_superTrendPullbackBuy = false; // BUY Pullback成立フラグ
+bool g_superTrendPullbackSell = false; // SELL Pullback成立フラグ
+bool g_superTrendReaccelBuy = false; // BUY Reacceleration成立フラグ
+bool g_superTrendReaccelSell = false; // SELL Reacceleration成立フラグ
+bool g_superTrendFlipBuy = false;    // BUY方向SuperTrend反転フラグ
+bool g_superTrendFlipSell = false;   // SELL方向SuperTrend反転フラグ
+double g_previousAsk = 0.0;           // Pullback/Reacceleration前回判定ASK
+double g_previousBid = 0.0;           // Pullback/Reacceleration前回判定BID
 
 // ===================================================================
 // 価格変数とフラグ変数の分離
 // ===================================================================
 // M1 で判定した決済価格を保持（OnTimer 設定、OnTick で比較）
-double g_closePriceBuy = 0.0;      // BUY ポジションを決済するための基準価格（ASK で比較）
-double g_closePriceSell = 0.0;     // SELL ポジションを決済するための基準価格（BID で比較）
-double g_rangeClosePriceBuy = 0.0;
-double g_rangeClosePriceSell = 0.0;
-double g_trendSuperTrendClosePriceBuy = 0.0;
-double g_trendSuperTrendClosePriceSell = 0.0;
-double g_trendBBMiddleClosePriceBuy = 0.0;
-double g_trendBBMiddleClosePriceSell = 0.0;
+double g_closePriceBuy = 0.0;      // BUY決済判定に使用する基準価格
+double g_closePriceSell = 0.0;     // SELL決済判定に使用する基準価格
+double g_rangeClosePriceBuy = 0.0; // レンジBUY決済用BB上限価格
+double g_rangeClosePriceSell = 0.0; // レンジSELL決済用BB下限価格
+double g_trendSuperTrendClosePriceBuy = 0.0; // トレンドBUY決済用SuperTrend価格
+double g_trendSuperTrendClosePriceSell = 0.0; // トレンドSELL決済用SuperTrend価格
+double g_trendBBMiddleClosePriceBuy = 0.0; // BUY決済用BB中央線価格
+double g_trendBBMiddleClosePriceSell = 0.0; // SELL決済用BB中央線価格
+
 // M1 で判定したエントリー価格（OnTimer 設定、OnTick で比較）
-double g_entryPriceBuy = 0.0;      // BUY エントリ基準価格（ASK で比較）
-double g_entryPriceSell = 0.0;     // SELL エントリ基準価格（BID で比較）
+double g_entryPriceBuy = 0.0;      // BUYエントリー判定に使用する基準価格
+double g_entryPriceSell = 0.0;     // SELLエントリー判定に使用する基準価格
 
 // 実行可否フラグ：価格が存在すること ≠ 実行してよいこと
 bool g_canEntryBuy = false;        // BUY エントリー実行可フラグ（初期OFF）
@@ -201,16 +206,18 @@ bool g_canCloseSell = false;       // SELL 決済実行可フラグ（初期OFF�
 
 bool g_entryBuyOnOrBelow = false;  // BUY エントリー閾値は下抜け/以下基準か
 bool g_entrySellOnOrAbove = false; // SELL エントリー閾値は上抜け/以上基準か
-bool g_closeBuyOnOrAbove = false;  // BUY 決済閾値は上抜け/以上基準か
-bool g_closeSellOnOrBelow = false; // SELL 決済閾値は下抜け/以下基準か
-bool g_stochasticCloseBuy = false;
-bool g_stochasticCloseSell = false;
-bool g_rangeBBCloseBuy = false;
-bool g_rangeBBCloseSell = false;
-bool g_trendSuperTrendCloseBuy = false;
-bool g_trendSuperTrendCloseSell = false;
-bool g_trendBBMiddleCloseBuy = false;
-bool g_trendBBMiddleCloseSell = false;
+bool g_closeBuyOnOrAbove = false;  // BUY決済価格を上抜け/以上で判定するか
+bool g_closeSellOnOrBelow = false; // SELL決済価格を下抜け/以下で判定するか
+bool g_stochasticCloseBuy = false; // BUYのStochastic決済条件
+bool g_stochasticCloseSell = false; // SELLのStochastic決済条件
+bool g_rangeBBCloseBuy = false;    // BUYのレンジBB決済条件
+bool g_rangeBBCloseSell = false;   // SELLのレンジBB決済条件
+bool g_trendSuperTrendCloseBuy = false; // BUYのTrend SuperTrend決済条件
+bool g_trendSuperTrendCloseSell = false; // SELLのTrend SuperTrend決済条件
+bool g_trendBBMiddleCloseBuy = false; // BUYのTrend BB中央線決済条件
+bool g_trendBBMiddleCloseSell = false; // SELLのTrend BB中央線決済条件
+int g_closeAnalysisMaskBuy = -1;    // BUY決済条件解析ログの直前状態
+int g_closeAnalysisMaskSell = -1;   // SELL決済条件解析ログの直前状態
 
 // エントリー判定フラグ：ブレイク後リトレース用
 bool g_entryThresholdCrossedBuy = false;   // BUY エントリー閾値超えフラグ（初期OFF）
@@ -254,6 +261,15 @@ struct SM15Signal
    bool pendingNextM1;             // 次のM1足で有効フラグ
 };
 SM15Signal g_M15Signal;             // M15シグナル管理構造体
+
+struct SEntryLogRecord
+{
+   ulong positionId;                // 個別ポジション識別子
+   ulong inDeal;                    // IN約定Deal番号
+   datetime inTime;                 // IN約定時刻
+   ulong inMilliseconds;            // INイベント時の経過ミリ秒カウンタ
+};
+SEntryLogRecord g_entryLogRecords[]; // ポジションごとのIN記録（OUT経過時間用）
 
 // ===================================================================
 // 取引リクエスト履歴
@@ -490,6 +506,7 @@ void AddTradeHistoryTimestamp(datetime t)
 
 // ===================================================================
 // ダイバージェンス補助（14本・時系列・3点比較）
+// ===================================================================
 double DivergenceValue(const double &values[], int logicalIndex, int count, bool series)
 {
    return values[series ? count - 1 - logicalIndex : logicalIndex];
@@ -792,11 +809,11 @@ public:
          m_state = STATE_UNKNOWN;
 
       m_value = g_h1_adxArr[1];
-      
+
       // H1 DI方向と EMA方向をグローバル変数に保存（追撃判定で使用）
       g_H1DiDir = diDir;
       g_H1EmaDir = emaDir;
-      
+
       // PrintFormat("H1判定 ADX[1]=%.3f ADX[2]=%.3f ADX[3]=%.3f DI+=%.3f DI-=%.3f DI差=%.3f EMA短=%.5f EMA長=%.5f DI：%s EMA：%s Type=%s State=%s",
       //    g_h1_adxArr[1], g_h1_adxArr[2], g_h1_adxArr[3], g_h1_dipArr[1], g_h1_dimArr[1], diDiff, g_h1_emaSArr[1], g_h1_emaLArr[1], diDir > 0 ? "上方向" : diDir < 0 ? "下方向" : "方向性なし", emaDir > 0 ? "上方向" : emaDir < 0 ? "下方向" : "方向性なし", TrendTypeToString(m_type), TrendStateToString(m_state));
       return(true);
@@ -1649,6 +1666,7 @@ int OnInit()
    g_rangeBBCloseBuy = g_rangeBBCloseSell = false;
    g_trendSuperTrendCloseBuy = g_trendSuperTrendCloseSell = false;
    g_trendBBMiddleCloseBuy = g_trendBBMiddleCloseSell = false;
+   g_closeAnalysisMaskBuy = g_closeAnalysisMaskSell = -1;
 
    // M15 signal 初期化
    g_M15Signal.barTime = 0;
@@ -1721,24 +1739,77 @@ string BuildCloseReason(bool stochasticCondition, bool rangeBBCondition, bool tr
    return reason == "" ? "不明" : reason;
 }
 
+double LogArrayValue(const double &values[], int index)
+{
+   if (index < 0 || index >= ArraySize(values))
+      return EMPTY_VALUE;
+   return values[index];
+}
+
+string LogSuperTrendDirection(int index)
+{
+   if (index < 0 || index >= ArraySize(g_superTrendDir))
+      return "不明";
+   if (g_superTrendDir[index] > 0)
+      return "上";
+   if (g_superTrendDir[index] < 0)
+      return "下";
+   return "不明";
+}
+
+void EvaluateCloseConditions(bool isBuy, double currentPrice, bool &stochasticCondition, bool &rangeBBCondition, bool &trendSuperTrendCondition, bool &trendBBMiddleCondition)
+{
+   double closePrice = isBuy ? g_closePriceBuy : g_closePriceSell;
+   bool priceReached = isBuy ? (g_closeBuyOnOrAbove ? currentPrice >= closePrice : currentPrice <= closePrice) // 決済価格到達状態
+                             : (g_closeSellOnOrBelow ? currentPrice <= closePrice : currentPrice >= closePrice);
+   rangeBBCondition = EnableRangeBBClose && (isBuy ? g_rangeBBCloseBuy : g_rangeBBCloseSell) && priceReached;
+   trendSuperTrendCondition = EnableTrendSuperTrendClose && (isBuy ? g_trendSuperTrendCloseBuy : g_trendSuperTrendCloseSell) && priceReached;
+   stochasticCondition = EnableStochasticClose && (isBuy ? g_stochasticCloseBuy : g_stochasticCloseSell);
+   trendBBMiddleCondition = EnableTrendBBMiddleClose && (isBuy ? g_trendBBMiddleCloseBuy : g_trendBBMiddleCloseSell);
+}
+
+void LogCloseConditionAnalysis(bool isBuy, double currentPrice, bool stochasticCondition, bool rangeBBCondition, bool trendSuperTrendCondition, bool trendBBMiddleCondition)
+{
+   PrintFormat("決済条件成立解析 time=%s type=%s price=%.5f Stochastic=%s RangeBB=%s TrendSuperTrend=%s TrendBB中央線=%s reason=%s M1確定足=%s StochK=%.3f StochD=%.3f BB上=%.5f BB中=%.5f BB下=%.5f SuperTrend=%.5f SuperTrend方向=%s",
+               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), isBuy ? "BUY" : "SELL", currentPrice,
+               stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false",
+               BuildCloseReason(stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition),
+               TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), LogArrayValue(g_stochK, 1), LogArrayValue(g_stochD, 1),
+               LogArrayValue(g_bbUpper, 1), LogArrayValue(g_bbMiddle, 1), LogArrayValue(g_bbLower, 1), LogArrayValue(g_superTrend, 1), LogSuperTrendDirection(1));
+}
+
 void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice, double currentPrice)
 {
    if (!canClose || closePrice <= 0)
       return;
 
    bool isBuy = (posType == POSITION_TYPE_BUY);
-   bool priceReached = isBuy ? (g_closeBuyOnOrAbove ? currentPrice >= closePrice : currentPrice <= closePrice)
-                             : (g_closeSellOnOrBelow ? currentPrice <= closePrice : currentPrice >= closePrice);
-   bool rangeBBCondition = EnableRangeBBClose && (isBuy ? g_rangeBBCloseBuy : g_rangeBBCloseSell) && priceReached;
-   bool trendSuperTrendCondition = EnableTrendSuperTrendClose && (isBuy ? g_trendSuperTrendCloseBuy : g_trendSuperTrendCloseSell) && priceReached;
-   bool stochasticCondition = EnableStochasticClose && (isBuy ? g_stochasticCloseBuy : g_stochasticCloseSell);
-   bool trendBBMiddleCondition = EnableTrendBBMiddleClose && (isBuy ? g_trendBBMiddleCloseBuy : g_trendBBMiddleCloseSell);
+   bool rangeBBCondition = false;
+   bool trendSuperTrendCondition = false;
+   bool stochasticCondition = false;
+   bool trendBBMiddleCondition = false;
+   EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
    bool condition = rangeBBCondition || trendSuperTrendCondition || stochasticCondition || trendBBMiddleCondition;
    if (!condition)
+   {
+      if (isBuy)
+         g_closeAnalysisMaskBuy = -1;
+      else
+         g_closeAnalysisMaskSell = -1;
       return;
+   }
 
    PrintFormat("決済条件状態 type=%s Stochastic=%s RangeBB=%s TrendSuperTrend=%s TrendBB中央線=%s", isBuy ? "BUY" : "SELL", stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
    string reason = BuildCloseReason(stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
+   int conditionMask = (stochasticCondition ? 1 : 0) | (rangeBBCondition ? 2 : 0) | (trendSuperTrendCondition ? 4 : 0) | (trendBBMiddleCondition ? 8 : 0);
+   if ((isBuy && conditionMask != g_closeAnalysisMaskBuy) || (!isBuy && conditionMask != g_closeAnalysisMaskSell))
+   {
+      LogCloseConditionAnalysis(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
+      if (isBuy)
+         g_closeAnalysisMaskBuy = conditionMask;
+      else
+         g_closeAnalysisMaskSell = conditionMask;
+   }
 
    int count = isBuy ? BuyCount : SellCount;
    if (count <= 0)
@@ -1965,6 +2036,63 @@ string DealReasonToString(long reason)
    return "その他";
 }
 
+void SaveEntryLogRecord(ulong positionId, ulong inDeal, datetime inTime)
+{
+   int size = ArraySize(g_entryLogRecords);
+   ArrayResize(g_entryLogRecords, size + 1);
+   g_entryLogRecords[size].positionId = positionId;
+   g_entryLogRecords[size].inDeal = inDeal;
+   g_entryLogRecords[size].inTime = inTime;
+   g_entryLogRecords[size].inMilliseconds = GetTickCount64();
+}
+
+bool FindEntryLogRecord(ulong positionId, datetime &inTime, ulong &inMilliseconds)
+{
+   for (int i = ArraySize(g_entryLogRecords) - 1; i >= 0; i--)
+   {
+      if (g_entryLogRecords[i].positionId == positionId)
+      {
+         inTime = g_entryLogRecords[i].inTime;
+         inMilliseconds = g_entryLogRecords[i].inMilliseconds;
+         return true;
+      }
+   }
+   return false;
+}
+
+void LogInAnalysis(ulong deal, ulong order, long dealType, datetime dealTime)
+{
+   bool isBuy = dealType == DEAL_TYPE_BUY;
+   bool stochasticCondition = false;
+   bool rangeBBCondition = false;
+   bool trendSuperTrendCondition = false;
+   bool trendBBMiddleCondition = false;
+   double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
+   double macdMain = LogArrayValue(g_m15_macdMainAll, 1);
+   double macdSignal = LogArrayValue(g_m15_macdSigAll, 1);
+   PrintFormat("IN解析 deal=%I64u order=%I64u type=%s price=%.5f lot=%.2f time=%s magic=%I64d M1確定足=%s H1確定足=%s M15確定足=%s H1TrendType=%s H1TrendState=%s H1DI方向=%s H1EMA方向=%s M15RSI=%.3f M15MACDMain=%.5f M15MACDSignal=%.5f M15MACDHistogram=%.5f M15MACDCross=%s M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1StochK=%.3f M1StochD=%.3f M1ATR=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s 決済Stochastic=%s 決済RangeBB=%s 決済TrendSuperTrend=%s 決済TrendBB中央線=%s",
+               deal, order, isBuy ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), TimeToString(dealTime, TIME_DATE | TIME_SECONDS), MagicNumber,
+               TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_H1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_M15, 1), TIME_DATE | TIME_SECONDS),
+               TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH), g_H1DiDir > 0 ? "上" : g_H1DiDir < 0 ? "下" : "不明", g_H1EmaDir > 0 ? "上" : g_H1EmaDir < 0 ? "下" : "不明",
+               LogArrayValue(g_m15_rsiArr, 1), macdMain, macdSignal, macdMain - macdSignal, MACDCrossDirToString(g_M15Signal.hasMACDCross ? g_M15Signal.macdCrossDir : 0),
+               LogArrayValue(g_bbUpper, 1), LogArrayValue(g_bbMiddle, 1), LogArrayValue(g_bbLower, 1), LogArrayValue(g_stochK, 1), LogArrayValue(g_stochD, 1), LogArrayValue(g_atr, 1), LogArrayValue(g_superTrend, 1), LogSuperTrendDirection(1),
+               stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
+}
+
+void LogOutAnalysis(ulong deal, ulong order, long positionType, long dealReason, datetime dealTime, ulong positionId)
+{
+   datetime inTime = 0;
+   ulong inMilliseconds = 0;
+   bool hasEntry = FindEntryLogRecord(positionId, inTime, inMilliseconds);
+   double elapsed = hasEntry ? (GetTickCount64() - inMilliseconds) / 1000.0 : -1.0;
+   PrintFormat("OUT解析 deal=%I64u order=%I64u position=%I64u type=%s price=%.5f lot=%.2f reason=%s time=%s INからOUTまで=%s M1確定足=%s H1確定足=%s H1TrendType=%s H1TrendState=%s M15RSI=%.3f M1StochK=%.3f M1StochD=%.3f M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s",
+               deal, order, positionId, positionType == POSITION_TYPE_BUY ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), DealReasonToString(dealReason), TimeToString(dealTime, TIME_DATE | TIME_SECONDS),
+               hasEntry ? DoubleToString(elapsed, 1) + "秒" : "不明", TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_H1, 1), TIME_DATE | TIME_SECONDS),
+               TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH), LogArrayValue(g_m15_rsiArr, 1), LogArrayValue(g_stochK, 1), LogArrayValue(g_stochD, 1),
+               LogArrayValue(g_bbUpper, 1), LogArrayValue(g_bbMiddle, 1), LogArrayValue(g_bbLower, 1), LogArrayValue(g_superTrend, 1), LogSuperTrendDirection(1));
+}
+
 //+------------------------------------------------------------------+
 //| TradeTransaction function                                        |
 //+------------------------------------------------------------------+
@@ -1990,9 +2118,25 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
          PrintFormat("Deal成立 deal=%I64u order=%I64u type=%s entry=%s reason=%s price=%.5f volume=%.2f",
                      trans.deal, trans.order, dealType == DEAL_TYPE_BUY ? "BUY" : "SELL", dealEntry == DEAL_ENTRY_IN ? "IN" : dealEntry == DEAL_ENTRY_OUT ? "OUT" : "その他", DealReasonToString(dealReason), HistoryDealGetDouble(trans.deal, DEAL_PRICE), HistoryDealGetDouble(trans.deal, DEAL_VOLUME));
          if (dealEntry == DEAL_ENTRY_IN)
+         {
+            datetime inTime = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
+            ulong positionId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+            if (positionId == 0)
+               positionId = trans.position;
+            SaveEntryLogRecord(positionId, trans.deal, inTime);
+            LogInAnalysis(trans.deal, trans.order, dealType, inTime);
             LogPositionSummary(dealType == DEAL_TYPE_BUY ? "買い発注しました。" : "売り発注しました。");
+         }
          else if (dealEntry == DEAL_ENTRY_OUT)
+         {
+            long positionType = dealType == DEAL_TYPE_SELL ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+            datetime outTime = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
+            ulong positionId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+            if (positionId == 0)
+               positionId = trans.position;
+            LogOutAnalysis(trans.deal, trans.order, positionType, dealReason, outTime, positionId);
             LogPositionSummary(dealType == DEAL_TYPE_SELL ? "買い決済しました。" : "売り決済しました。");
+         }
          else
             LogPositionSummary("取引が発生しました。");
          break;
