@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.25"
+#property version   "3.26"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -1731,6 +1731,13 @@ void ForceCloseWeekendPositions()
          continue;
       if (PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
          continue;
+      MqlTick tick;
+      ZeroMemory(tick);
+      SymbolInfoTick(_Symbol, tick);
+      double spreadPts = (tick.ask - tick.bid) / _Point;
+      PrintFormat("週末強制決済対象 ticket=%I64u 方向=%s 判定時刻=%s BID=%.5f ASK=%.5f Spread=%.1f 通常決済関数を呼び出します",
+                  ticket, PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL",
+                  TimeToString(TimeTradeServer(), TIME_DATE | TIME_SECONDS), tick.bid, tick.ask, spreadPts);
       ClosePositionByTicket(ticket, "週末休場前の強制決済");
    }
 }
@@ -2563,5 +2570,8 @@ void OnTimer()
    if (newM1Bar && g_M15Signal.pendingNextM1 && bM1 >= g_M15Signal.expireM1BarTime)
       g_M15Signal.pendingNextM1 = false;
 
-   ProcessWeekendSession(TimeCurrent(), h1Updated);
+   datetime tradeServerTime = TimeTradeServer();
+   if (tradeServerTime <= 0)
+      return;
+   ProcessWeekendSession(tradeServerTime, h1Updated);
 }
