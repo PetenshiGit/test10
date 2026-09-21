@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.27"
+#property version   "3.28"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -1989,7 +1989,6 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
       return;
    }
 
-   PrintFormat("決済条件状態 type=%s Stochastic=%s RangeBB=%s TrendSuperTrend=%s TrendBB中央線=%s", isBuy ? "BUY" : "SELL", stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
    string reason = BuildCloseReason(stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
    int conditionMask = (stochasticCondition ? 1 : 0) | (rangeBBCondition ? 2 : 0) | (trendSuperTrendCondition ? 4 : 0) | (trendBBMiddleCondition ? 8 : 0);
    if ((isBuy && conditionMask != g_closeAnalysisMaskBuy) || (!isBuy && conditionMask != g_closeAnalysisMaskSell))
@@ -2019,6 +2018,7 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
 
       if (ClosePositionByTicket(ticket, reason))
       {
+         PrintFormat("決済条件状態 type=%s Stochastic=%s RangeBB=%s TrendSuperTrend=%s TrendBB中央線=%s", isBuy ? "BUY" : "SELL", stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
          if (isBuy)
             g_lastBuyCloseBarTime = LastM1;
          else
