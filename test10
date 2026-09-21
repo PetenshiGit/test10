@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.26"
+#property version   "3.27"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -1603,9 +1603,9 @@ datetime ServerDayStart(datetime value)
    return StructToTime(parts);
 }
 
-long SessionSeconds(datetime value)
+int SessionSeconds(datetime value)
 {
-   long seconds = (long)value % 86400;
+   int seconds = (int)((long)value % 86400);
    if (seconds < 0)
       seconds += 86400;
    return seconds;
@@ -1631,8 +1631,8 @@ bool FindWeekendSession(datetime now, datetime &sessionEnd, datetime &nextSessio
          if (!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dayParts.day_of_week, sessionIndex, from, to))
             break;
 
-         long fromSeconds = SessionSeconds(from);
-         long toSeconds = SessionSeconds(to);
+         int fromSeconds = SessionSeconds(from);
+         int toSeconds = SessionSeconds(to);
          datetime start = dayStart + fromSeconds;
          datetime end = 0;
          if (fromSeconds == 0 && toSeconds == 0)
@@ -1722,26 +1722,6 @@ void UpdateWeekendSessionSchedule(datetime now)
    }
 }
 
-void ForceCloseWeekendPositions()
-{
-   for (int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if (!PositionSelectByTicket(ticket))
-         continue;
-      if (PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-         continue;
-      MqlTick tick;
-      ZeroMemory(tick);
-      SymbolInfoTick(_Symbol, tick);
-      double spreadPts = (tick.ask - tick.bid) / _Point;
-      PrintFormat("週末強制決済対象 ticket=%I64u 方向=%s 判定時刻=%s BID=%.5f ASK=%.5f Spread=%.1f 通常決済関数を呼び出します",
-                  ticket, PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL",
-                  TimeToString(TimeTradeServer(), TIME_DATE | TIME_SECONDS), tick.bid, tick.ask, spreadPts);
-      ClosePositionByTicket(ticket, "週末休場前の強制決済");
-   }
-}
-
 void ProcessWeekendSession(datetime now, bool refreshSchedule)
 {
    if (g_weekendTargetValid && now >= g_weekendNextSessionStart)
@@ -1768,7 +1748,22 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
       g_weekendEntryStopped = true;
       g_weekendForceCloseActive = true;
       PrintFormat("週末強制全決済開始：時刻=%s", TimeToString(now, TIME_DATE | TIME_SECONDS));
-      ForceCloseWeekendPositions();
+      for (int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if (!PositionSelectByTicket(ticket))
+            continue;
+         if (PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+            continue;
+         MqlTick tick;
+         ZeroMemory(tick);
+         SymbolInfoTick(_Symbol, tick);
+         double spreadPts = (tick.ask - tick.bid) / _Point;
+         PrintFormat("週末強制決済対象 ticket=%I64u 方向=%s 判定時刻=%s BID=%.5f ASK=%.5f Spread=%.1f 通常決済関数を呼び出します",
+                     ticket, PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL",
+                     TimeToString(now, TIME_DATE | TIME_SECONDS), tick.bid, tick.ask, spreadPts);
+         ClosePositionByTicket(ticket, "週末休場前の強制決済");
+      }
    }
 }
 
