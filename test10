@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.28"
+#property version   "3.30"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -21,29 +21,31 @@ CTrade trade;
 // ===================================================================
 // ユーザー入力
 // ===================================================================
-input long   MagicNumber           = 3625;  // トレードの識別番号
-input double BaseLot               = 1.0;   // 基本ロットサイズ
-input double MaxLot                = 2.0;   // 最大ロットサイズ（未実装：現時点では固定ロット方式を使用しており、資金連動ロット計算は使用していません）
-input double RiskPercentEquity     = 1.0;   // リスク率（%）（未実装：現時点では資金量連動ロット計算に使用していません）
-input int    MaxAllowedSpread      = 25;    // 最大許容スプレッド（ポイント）
-input int    SL_Points             = 40;    // ストップロス幅（ポイント）
-input int MinSLUpdatePoints        = 1;     // SL更新の最低差分（ポイント）
-input double RiskRewardRatio       = 2.0;   // リスク・リワード比率
-input bool EnableStochasticClose   = true;  // Stochastic決済
-input bool EnableRangeBBClose      = true;  // レンジBB逆側決済
+input long MagicNumber              = 3625;  // トレードの識別番号
+input double BaseLot                = 1.0;   // 基本ロットサイズ
+input double MaxLot                 = 2.0;   // 最大ロットサイズ（未実装：現時点では固定ロット方式を使用しており、資金連動ロット計算は使用していません）
+input double RiskPercentEquity      = 1.0;   // リスク率（%）（未実装：現時点では資金量連動ロット計算に使用していません）
+input int MaxAllowedSpread          = 25;    // 最大許容スプレッド（ポイント）
+input int SL_Points                 = 40;    // ストップロス幅（ポイント）
+input int MinSLUpdatePoints         = 1;     // SL更新の最低差分（ポイント）
+input double RiskRewardRatio        = 2.0;   // リスク・リワード比率
+input bool EnableStochasticClose    = true;  // Stochastic決済
+input bool EnableRangeBBClose       = true;  // レンジBB逆側決済
 input bool EnableTrendSuperTrendClose = true; // トレンドSuperTrend決済
-input bool EnableTrendBBMiddleClose = true; // トレンドBB中央線緊急決済
+input bool EnableTrendBBMiddleClose = true;  // トレンドBB中央線緊急決済
 input bool EnableRangeTP            = true;  // レンジTP
 input bool EnableStopLoss           = true;  // 保護用SL
-input bool EnableEntryOnCloseSignal = true; // 決済シグナルと新規エントリーシグナルが同時成立した場合にエントリーを許可
+input bool EnableEntryOnCloseSignal = true;  // 決済シグナルと新規エントリーシグナルが同時成立した場合にエントリーを許可
+input bool EnableTrendTrading       = true;  // H1トレンド判定時の新規エントリーの許可
+input bool EnableRangeTrading       = true;  // H1レンジ判定時の新規エントリーの許可
 
 // ===================================================================
 // 内部パラメータ（input にはしない）
 // ===================================================================
 int maxPositionsNormal = 1;         // 通常時の同一方向最大ポジション数
 int maxPositionsPyramid = 3;        // 追撃を含めた同一方向の最終最大ポジション数
-int NewEntryStopBeforeClose = 3 * 60 * 60;
-int ForceCloseBeforeClose = 10 * 60;
+int NewEntryStopBeforeClose = 3 * 60 * 60; // 週末取引終了前の新規発注停止時間（秒）
+int ForceCloseBeforeClose = 10 * 60;       // 週末取引終了前の強制決済開始時間（秒）
 
 int adxPeriod = 14;                 // ADX周期
 int adxThreshold = 25;              // ADX弱トレンド判定閾値
@@ -92,17 +94,17 @@ int h_atr = INVALID_HANDLE;     // ATRインジケータハンドル
 // CopyBufferの配列はそのまま使い、内部仕様を統一する。
 // [0] = 現在形成中の未確定足, [1] = 直近の確定足, [2] = 2本前の確定足
 // ===================================================================
-double g_bbUpper[];                 // ボリンジャーバンド上限値配列（1分足）
-double g_bbMiddle[];                // ボリンジャーバンド中値配列（1分足）
-double g_bbLower[];                 // ボリンジャーバンド下限値配列（1分足）
-double g_stochK[];                  // ストキャスティクスK線配列（1分足）
-double g_stochD[];                  // ストキャスティクスD線配列（1分足）
-double g_atr[];                     // ATR値配列（1分足）
-double g_m1High[];                  // M1高値配列
-double g_m1Low[];                   // M1安値配列
-double g_m1Close[];                 // M1終値配列
-double g_superTrend[];              // スーパートレンド値配列（1分足）
-int    g_superTrendDir[];           // スーパートレンド方向配列（1分足）
+double g_bbUpper[];        // ボリンジャーバンド上限値配列（1分足）
+double g_bbMiddle[];       // ボリンジャーバンド中値配列（1分足）
+double g_bbLower[];        // ボリンジャーバンド下限値配列（1分足）
+double g_stochK[];         // ストキャスティクスK線配列（1分足）
+double g_stochD[];         // ストキャスティクスD線配列（1分足）
+double g_atr[];            // ATR値配列（1分足）
+double g_m1High[];         // M1高値配列
+double g_m1Low[];          // M1安値配列
+double g_m1Close[];        // M1終値配列
+double g_superTrend[];     // スーパートレンド値配列（1分足）
+int    g_superTrendDir[];  // スーパートレンド方向配列（1分足）
 
 // ===================================================================
 // 列挙型（仕様コメントは日本語で保持）
@@ -145,12 +147,12 @@ enum DivergenceType
 // ===================================================================
 // グローバル変数とオブジェクトの定義
 // ===================================================================
-datetime LastH1 = 0;                 // H1の現在形成中バー時刻（更新判定用）
-datetime LastM15 = 0;                // M15の現在形成中バー時刻（更新判定用）
-datetime LastM1 = 0;                 // M1の現在形成中バー時刻（更新判定用）
-int NowPositions = 0;                // EA管理対象ポジションの合計数
-int BuyCount = 0;                   // EA管理対象BUYポジション数
-int SellCount = 0;                  // EA管理対象SELLポジション数
+datetime LastH1 = 0;    // H1の現在形成中バー時刻（更新判定用）
+datetime LastM15 = 0;   // M15の現在形成中バー時刻（更新判定用）
+datetime LastM1 = 0;    // M1の現在形成中バー時刻（更新判定用）
+int NowPositions = 0;   // EA管理対象ポジションの合計数
+int BuyCount = 0;       // EA管理対象BUYポジション数
+int SellCount = 0;      // EA管理対象SELLポジション数
 
 // ===================================================================
 // 判定結果をグローバル enum として保持（H1/M15）
@@ -159,65 +161,65 @@ TrendType      g_TrendTypeH = TREND_UNKNOWN;      // H1トレンドの種別
 TrendState     g_TrendStateH = STATE_UNKNOWN;     // H1トレンドの状態
 double         g_TrendValueH = 0.0;               // H1トレンド値（ADXなど）
 
-int g_H1DiDir = 0;                // H1 DI方向（1=上、-1=下、0=不明）
-int g_H1EmaDir = 0;               // H1 EMA方向（1=上、-1=下、0=不明）
+int g_H1DiDir = 0;      // H1 DI方向（1=上、-1=下、0=不明）
+int g_H1EmaDir = 0;     // H1 EMA方向（1=上、-1=下、0=不明）
 
-datetime g_lastBuyEntryBarTime = 0;   // BUYの直近エントリーに使用したM1確定バー時刻
-datetime g_lastSellEntryBarTime = 0;  // SELLの直近エントリーに使用したM1確定バー時刻
-datetime g_lastBuyCloseBarTime = 0;   // BUY決済を実行した直近M1バー時刻
-datetime g_lastSellCloseBarTime = 0;  // SELL決済を実行した直近M1バー時刻
-bool g_superTrendInitialized = false; // SuperTrendの初期計算完了フラグ
+datetime g_lastBuyEntryBarTime = 0;    // BUYの直近エントリーに使用したM1確定バー時刻
+datetime g_lastSellEntryBarTime = 0;   // SELLの直近エントリーに使用したM1確定バー時刻
+datetime g_lastBuyCloseBarTime = 0;    // BUY決済を実行した直近M1バー時刻
+datetime g_lastSellCloseBarTime = 0;   // SELL決済を実行した直近M1バー時刻
+bool g_superTrendInitialized = false;  // SuperTrendの初期計算完了フラグ
 double g_superTrendLast = EMPTY_VALUE; // 直近計算済みSuperTrend値
 double g_superTrendFinalUpper = EMPTY_VALUE; // SuperTrend最終Upper Band
 double g_superTrendFinalLower = EMPTY_VALUE; // SuperTrend最終Lower Band
-int g_superTrendLastDir = 0;         // 直近SuperTrend方向（1=上、-1=下）
-double g_pullbackThresholdBuy = 0.0; // BUY Pullback判定ライン
-double g_pullbackThresholdSell = 0.0; // SELL Pullback判定ライン
-double g_reaccelThresholdBuy = 0.0;  // BUY Reacceleration判定ライン
-double g_reaccelThresholdSell = 0.0; // SELL Reacceleration判定ライン
-bool g_superTrendPullbackBuy = false; // BUY Pullback成立フラグ
+int g_superTrendLastDir = 0;           // 直近SuperTrend方向（1=上、-1=下）
+double g_pullbackThresholdBuy = 0.0;   // BUY Pullback判定ライン
+double g_pullbackThresholdSell = 0.0;  // SELL Pullback判定ライン
+double g_reaccelThresholdBuy = 0.0;    // BUY Reacceleration判定ライン
+double g_reaccelThresholdSell = 0.0;   // SELL Reacceleration判定ライン
+bool g_superTrendPullbackBuy = false;  // BUY Pullback成立フラグ
 bool g_superTrendPullbackSell = false; // SELL Pullback成立フラグ
-bool g_superTrendReaccelBuy = false; // BUY Reacceleration成立フラグ
-bool g_superTrendReaccelSell = false; // SELL Reacceleration成立フラグ
-bool g_superTrendFlipBuy = false;    // BUY方向SuperTrend反転フラグ
-bool g_superTrendFlipSell = false;   // SELL方向SuperTrend反転フラグ
-double g_previousAsk = 0.0;           // Pullback/Reacceleration前回判定ASK
-double g_previousBid = 0.0;           // Pullback/Reacceleration前回判定BID
+bool g_superTrendReaccelBuy = false;   // BUY Reacceleration成立フラグ
+bool g_superTrendReaccelSell = false;  // SELL Reacceleration成立フラグ
+bool g_superTrendFlipBuy = false;      // BUY方向SuperTrend反転フラグ
+bool g_superTrendFlipSell = false;     // SELL方向SuperTrend反転フラグ
+double g_previousAsk = 0.0;            // Pullback/Reacceleration前回判定ASK
+double g_previousBid = 0.0;            // Pullback/Reacceleration前回判定BID
 
 // ===================================================================
 // 価格変数とフラグ変数の分離
 // ===================================================================
 // M1 で判定した決済価格を保持（OnTimer 設定、OnTick で比較）
-double g_closePriceBuy = 0.0;      // BUY決済判定に使用する基準価格
-double g_closePriceSell = 0.0;     // SELL決済判定に使用する基準価格
-double g_rangeClosePriceBuy = 0.0; // レンジBUY決済用BB上限価格
+double g_closePriceBuy = 0.0;       // BUY決済判定に使用する基準価格
+double g_closePriceSell = 0.0;      // SELL決済判定に使用する基準価格
+double g_rangeClosePriceBuy = 0.0;  // レンジBUY決済用BB上限価格
 double g_rangeClosePriceSell = 0.0; // レンジSELL決済用BB下限価格
-double g_trendSuperTrendClosePriceBuy = 0.0; // トレンドBUY決済用SuperTrend価格
-double g_trendSuperTrendClosePriceSell = 0.0; // トレンドSELL決済用SuperTrend価格
-double g_trendBBMiddleClosePriceBuy = 0.0; // BUY決済用BB中央線価格
-double g_trendBBMiddleClosePriceSell = 0.0; // SELL決済用BB中央線価格
+double g_trendSuperTrendClosePriceBuy = 0.0;    // トレンドBUY決済用SuperTrend価格
+double g_trendSuperTrendClosePriceSell = 0.0;   // トレンドSELL決済用SuperTrend価格
+double g_trendBBMiddleClosePriceBuy = 0.0;   // BUY決済用BB中央線価格
+double g_trendBBMiddleClosePriceSell = 0.0;  // SELL決済用BB中央線価格
 
 // M1 で判定したエントリー価格（OnTimer 設定、OnTick で比較）
-double g_entryPriceBuy = 0.0;      // BUYエントリー判定に使用する基準価格
-double g_entryPriceSell = 0.0;     // SELLエントリー判定に使用する基準価格
+double g_entryPriceBuy = 0.0;       // BUYエントリー判定に使用する基準価格
+double g_entryPriceSell = 0.0;      // SELLエントリー判定に使用する基準価格
 
 // 実行可否フラグ：価格が存在すること ≠ 実行してよいこと
-bool g_canEntryBuy = false;        // BUY エントリー実行可フラグ（初期OFF）
-bool g_canEntrySell = false;       // SELL エントリー実行可フラグ（初期OFF）
-bool g_canCloseBuy = false;        // BUY 決済実行可フラグ（初期OFF）
-bool g_canCloseSell = false;       // SELL 決済実行可フラグ（初期OFF）
+bool g_canEntryBuy = false;         // BUY エントリー実行可フラグ（初期OFF）
+bool g_canEntrySell = false;        // SELL エントリー実行可フラグ（初期OFF）
+bool g_canCloseBuy = false;         // BUY 決済実行可フラグ（初期OFF）
+bool g_canCloseSell = false;        // SELL 決済実行可フラグ（初期OFF）
 
-bool g_entryBuyOnOrBelow = false;  // BUY エントリー閾値は下抜け/以下基準か
-bool g_entrySellOnOrAbove = false; // SELL エントリー閾値は上抜け/以上基準か
-bool g_closeBuyOnOrAbove = false;  // BUY決済価格を上抜け/以上で判定するか
-bool g_closeSellOnOrBelow = false; // SELL決済価格を下抜け/以下で判定するか
-bool g_stochasticCloseBuy = false; // BUYのStochastic決済条件
+bool g_entryBuyOnOrBelow = false;   // BUY エントリー閾値は下抜け/以下基準か
+bool g_entrySellOnOrAbove = false;  // SELL エントリー閾値は上抜け/以上基準か
+bool g_closeBuyOnOrAbove = false;   // BUY決済価格を上抜け/以上で判定するか
+bool g_closeSellOnOrBelow = false;  // SELL決済価格を下抜け/以下で判定するか
+bool g_stochasticCloseBuy = false;  // BUYのStochastic決済条件
 bool g_stochasticCloseSell = false; // SELLのStochastic決済条件
-bool g_rangeBBCloseBuy = false;    // BUYのレンジBB決済条件
-bool g_rangeBBCloseSell = false;   // SELLのレンジBB決済条件
-bool g_trendSuperTrendCloseBuy = false; // BUYのTrend SuperTrend決済条件
-bool g_trendSuperTrendCloseSell = false; // SELLのTrend SuperTrend決済条件
-bool g_trendBBMiddleCloseBuy = false; // BUYのTrend BB中央線決済条件
+bool g_rangeBBCloseBuy = false;     // BUYのレンジBB決済条件
+bool g_rangeBBCloseSell = false;    // SELLのレンジBB決済条件
+bool g_trendSuperTrendCloseBuy = false;   // BUYのTrend SuperTrend決済条件
+bool g_trendSuperTrendCloseSell = false;  // SELLのTrend SuperTrend決済条件
+bool g_trendBBMiddleCloseBuy = false;  // BUYのTrend BB中央線決済条件
 bool g_trendBBMiddleCloseSell = false; // SELLのTrend BB中央線決済条件
 int g_closeAnalysisMaskBuy = -1;    // BUY決済条件解析ログの直前状態
 int g_closeAnalysisMaskSell = -1;   // SELL決済条件解析ログの直前状態
@@ -255,22 +257,22 @@ bool g_m1_bb_ok = false, g_m1_stoch_ok = false, g_m1_atr_ok = false;
 // ===================================================================
 struct SM15Signal
 {
-   datetime barTime;               // シグナル発生時刻
-   datetime expireM1BarTime;       // 次のM1足で消滅するタイミング
-   bool suppressBuyPyramid;        // BUY追撃抑制フラグ
-   bool suppressSellPyramid;       // SELL追撃抑制フラグ
-   bool hasMACDCross;              // MACDクロスフラグ
-   int macdCrossDir;               // MACDクロス方向（1=ゴールデンクロス、-1=デッドクロス）
-   bool pendingNextM1;             // 次のM1足で有効フラグ
+   datetime barTime;          // シグナル発生時刻
+   datetime expireM1BarTime;  // 次のM1足で消滅するタイミング
+   bool suppressBuyPyramid;   // BUY追撃抑制フラグ
+   bool suppressSellPyramid;  // SELL追撃抑制フラグ
+   bool hasMACDCross;         // MACDクロスフラグ
+   int macdCrossDir;          // MACDクロス方向（1=ゴールデンクロス、-1=デッドクロス）
+   bool pendingNextM1;        // 次のM1足で有効フラグ
 };
-SM15Signal g_M15Signal;             // M15シグナル管理構造体
+SM15Signal g_M15Signal;       // M15シグナル管理構造体
 
 struct SEntryLogRecord
 {
-   ulong positionId;                // 個別ポジション識別子
-   ulong inDeal;                    // IN約定Deal番号
-   datetime inTime;                 // IN約定時刻
-   long inTimeMsc;                  // IN約定時刻（ミリ秒）
+   ulong positionId;    // 個別ポジション識別子
+   ulong inDeal;        // IN約定Deal番号
+   datetime inTime;     // IN約定時刻
+   long inTimeMsc;      // IN約定時刻（ミリ秒）
 };
 SEntryLogRecord g_entryLogRecords[]; // ポジションごとのIN記録（OUT経過時間用）
 
@@ -1341,14 +1343,20 @@ public:
       {
          g_entryThresholdCrossedBuy = false;
          g_entryThresholdCrossedSell = false;
-         g_entryPriceBuy = g_superTrend[1];
-         g_entryPriceSell = g_superTrend[1];
+         g_entryPriceBuy = g_bbMiddle[1];
+         g_entryPriceSell = g_bbMiddle[1];
          g_entryBuyOnOrBelow = false;
          g_entrySellOnOrAbove = false;
          g_closeBuyOnOrAbove = false;
          g_closeSellOnOrBelow = false;
-         g_canEntryBuy = g_superTrendFlipBuy || g_superTrendReaccelBuy || g_TrendStateH == RANGE_TO_TREND;
-         g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
+         double close1 = g_m1Close[1];
+         double close2 = g_m1Close[2];
+         double bbWidth = g_bbUpper[1] - g_bbLower[1];
+         bool bbWidthOk = bbWidth >= SL_Points * 1.5 * _Point;
+         bool buyMiddleCross = close2 <= g_bbMiddle[2] && close1 > g_bbMiddle[1];
+         bool sellMiddleCross = close2 >= g_bbMiddle[2] && close1 < g_bbMiddle[1];
+         g_canEntryBuy = g_superTrendDir[1] > 0 && buyMiddleCross && bbWidthOk;
+         g_canEntrySell = g_superTrendDir[1] < 0 && sellMiddleCross && bbWidthOk;
       }
 
       if (g_entryPriceBuy <= 0.0)
@@ -1370,12 +1378,12 @@ public:
          g_canEntryBuy = false; g_canEntrySell = false; g_canCloseBuy = false; g_canCloseSell = false;
       }
 
-      if (g_entryPriceBuy > 0.0 && g_closePriceBuy > 0.0 && g_entryPriceBuy > g_closePriceBuy)
+      if (h1Type == TREND_RANGE && g_entryPriceBuy > 0.0 && g_closePriceBuy > 0.0 && g_entryPriceBuy > g_closePriceBuy)
       {
          g_entryPriceBuy = 0.0;
          g_canEntryBuy = false;
       }
-      if (g_entryPriceSell > 0.0 && g_closePriceSell > 0.0 && g_entryPriceSell < g_closePriceSell)
+      if (h1Type == TREND_RANGE && g_entryPriceSell > 0.0 && g_closePriceSell > 0.0 && g_entryPriceSell < g_closePriceSell)
       {
          g_entryPriceSell = 0.0;
          g_canEntrySell = false;
@@ -1415,8 +1423,8 @@ public:
 
       if (g_TrendTypeH != TREND_RANGE && g_TrendTypeH != TREND_UNKNOWN)
       {
-         g_canEntryBuy = g_superTrendFlipBuy || g_superTrendReaccelBuy || g_TrendStateH == RANGE_TO_TREND;
-         g_canEntrySell = g_superTrendFlipSell || g_superTrendReaccelSell || g_TrendStateH == RANGE_TO_TREND;
+         g_canEntryBuy = g_canEntryBuy || g_superTrendReaccelBuy;
+         g_canEntrySell = g_canEntrySell || g_superTrendReaccelSell;
       }
    }
 };
@@ -1567,17 +1575,16 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
 
 void UpdateTrailingStops()
 {
-   if (!EnableStopLoss)
+   if (!EnableStopLoss || !g_h1AllOk || !g_m1AllOk ||
+       (g_TrendTypeH != TREND_STRONG_UP && g_TrendTypeH != TREND_WEAK_UP &&
+        g_TrendTypeH != TREND_STRONG_DOWN && g_TrendTypeH != TREND_WEAK_DOWN) ||
+       !IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0)
       return;
 
-   double buyNewSL = 0.0;
-   double sellNewSL = 0.0;
-   if (g_h1AllOk && g_m1AllOk && g_TrendTypeH != TREND_RANGE && g_TrendTypeH != TREND_UNKNOWN && IsIndicatorValueValid(g_superTrend[1]))
-   {
-      buyNewSL = g_superTrend[1];
-      sellNewSL = g_superTrend[1];
-   }
-   if (buyNewSL <= 0.0 && sellNewSL <= 0.0)
+   double slDistance = MathMax(g_atr[1] * atrMultiplierTrail, SL_Points * _Point);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if (bid <= 0.0 || ask <= 0.0)
       return;
    for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -1586,10 +1593,19 @@ void UpdateTrailingStops()
          continue;
       long ptype = PositionGetInteger(POSITION_TYPE);
       double currentSL = PositionGetDouble(POSITION_SL);
-      if (ptype == POSITION_TYPE_BUY && g_superTrendDir[1] > 0 && buyNewSL > currentSL && buyNewSL - currentSL >= MinSLUpdatePoints * _Point)
-         ModifyPositionSLTP(ticket, buyNewSL, PositionGetDouble(POSITION_TP));
-      else if (ptype == POSITION_TYPE_SELL && g_superTrendDir[1] < 0 && (currentSL == 0.0 || sellNewSL < currentSL) && (currentSL == 0.0 || currentSL - sellNewSL >= MinSLUpdatePoints * _Point))
-         ModifyPositionSLTP(ticket, sellNewSL, PositionGetDouble(POSITION_TP));
+      if (ptype == POSITION_TYPE_BUY)
+      {
+         double candidateSL = NormalizeDouble(bid - slDistance, _Digits);
+         if (candidateSL > currentSL && candidateSL - currentSL >= MinSLUpdatePoints * _Point)
+            ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP));
+      }
+      else if (ptype == POSITION_TYPE_SELL)
+      {
+         double candidateSL = NormalizeDouble(ask + slDistance, _Digits);
+         if ((currentSL == 0.0 || candidateSL < currentSL) &&
+             (currentSL == 0.0 || currentSL - candidateSL >= MinSLUpdatePoints * _Point))
+            ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP));
+      }
    }
 }
 
@@ -2037,12 +2053,18 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       return;
    if (!canEntry || entryPrice <= 0 || g_TrendTypeH == TREND_UNKNOWN || !g_h1AllOk || !g_m15AllOk || !g_m1AllOk)
       return;
+   bool isTrend = g_TrendTypeH == TREND_STRONG_UP || g_TrendTypeH == TREND_WEAK_UP ||
+                  g_TrendTypeH == TREND_STRONG_DOWN || g_TrendTypeH == TREND_WEAK_DOWN;
+   bool isRange = g_TrendTypeH == TREND_RANGE;
+   if ((!isTrend && !isRange) || (isTrend && !EnableTrendTrading) || (isRange && !EnableRangeTrading))
+      return;
    if (!IsIndicatorValueValid(entryPrice) || !IsIndicatorValueValid(ask) || !IsIndicatorValueValid(bid))
       return;
 
    bool isBuy = (posType == POSITION_TYPE_BUY);
    int sameDirCount = isBuy ? BuyCount : SellCount;
-   if (g_TrendTypeH != TREND_RANGE && ((isBuy && g_H1DiDir != 1) || (!isBuy && g_H1DiDir != -1)))
+   if (isTrend && ((isBuy && (g_H1DiDir != 1 || g_superTrendDir[1] <= 0)) ||
+                   (!isBuy && (g_H1DiDir != -1 || g_superTrendDir[1] >= 0))))
       return;
    if ((isBuy && g_lastBuyCloseBarTime == LastM1) || (!isBuy && g_lastSellCloseBarTime == LastM1))
       return;
@@ -2059,6 +2081,18 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       return;
    if (allowPyramid && sameDirCount >= maxPositionsPyramid)
       return;
+
+   if (isTrend && !allowPyramid)
+   {
+      double close1 = g_m1Close[1];
+      double close2 = g_m1Close[2];
+      double bbWidth = g_bbUpper[1] - g_bbLower[1];
+      bool bbWidthOk = bbWidth >= SL_Points * 1.5 * _Point;
+      bool middleCross = isBuy ? (close2 <= g_bbMiddle[2] && close1 > g_bbMiddle[1])
+                               : (close2 >= g_bbMiddle[2] && close1 < g_bbMiddle[1]);
+      if (!bbWidthOk || !middleCross)
+         return;
+   }
 
    if (isBuy && g_lastBuyEntryBarTime > 0 && LastM1 <= g_lastBuyEntryBarTime + PeriodSeconds(PERIOD_M1))
       return;
@@ -2084,7 +2118,10 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       return;
 
    double price = currentPrice;
-   double sl = EnableStopLoss ? (isBuy ? (price - SL_Points * _Point) : (price + SL_Points * _Point)) : 0.0;
+   if (EnableStopLoss && (!IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0))
+      return;
+   double slDistance = MathMax(g_atr[1] * atrMultiplierSL, SL_Points * _Point);
+   double sl = EnableStopLoss ? NormalizeDouble(isBuy ? (price - slDistance) : (price + slDistance), _Digits) : 0.0;
    double tp = 0.0;
    if (g_TrendTypeH == TREND_RANGE && EnableRangeTP)
       tp = isBuy ? (price + SL_Points * RiskRewardRatio * _Point) : (price - SL_Points * RiskRewardRatio * _Point);
