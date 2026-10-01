@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.30"
+#property version   "3.31"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -22,19 +22,35 @@ CTrade trade;
 // ユーザー入力
 // ===================================================================
 input long MagicNumber              = 3625;  // トレードの識別番号
-input double BaseLot                = 1.0;   // 基本ロットサイズ
+input double BaseLot                = 1.0;   // 基本ロットサイズ（固定ロット方式）
 input double MaxLot                 = 2.0;   // 最大ロットサイズ（未実装：現時点では固定ロット方式を使用しており、資金連動ロット計算は使用していません）
 input double RiskPercentEquity      = 1.0;   // リスク率（%）（未実装：現時点では資金量連動ロット計算に使用していません）
-input int MaxAllowedSpread          = 25;    // 最大許容スプレッド（ポイント）
-input int SL_Points                 = 40;    // ストップロス幅（ポイント）
-input int MinSLUpdatePoints         = 1;     // SL更新の最低差分（ポイント）
-input double RiskRewardRatio        = 2.0;   // リスク・リワード比率
-input bool EnableStochasticClose    = true;  // Stochastic決済
-input bool EnableRangeBBClose       = true;  // レンジBB逆側決済
-input bool EnableTrendSuperTrendClose = true; // トレンドSuperTrend決済
-input bool EnableTrendBBMiddleClose = true;  // トレンドBB中央線緊急決済
-input bool EnableRangeTP            = true;  // レンジTP
-input bool EnableStopLoss           = true;  // 保護用SL
+input int MaxAllowedSpread          = 25;    // 最大許容スプレッド（Points）（指定値を超過した場合、発注を実行しない）
+input int SL_Points                 = 40;    // 逆指値（StopLoss）の最低幅（Points）（ATRによるSL幅がこの値より小さい場合は、この値を使用する）
+input int MinSLUpdatePoints         = 1;     // SL更新を実行する際の最低価格差（Points）（現在のSLと新しいSLの差がこの値未満の場合はSLを更新しない）
+input double RiskRewardRatio        = 2.0;   // リスク・リワード比率（TP幅をSL幅の何倍にするか）（現在のレンジTP計算では使用しない）
+input bool EnableStochasticClose    = true;  // Stochasticによる決済を有効/無効（トレンド・レンジ時の両方で同じ判定を使用する）
+input bool EnableRangeBBClose       = true;  // 旧レンジBB逆側決済設定。
+                                              // 新仕様ではレンジTPをエントリー時の反対側外側BBに変更したため使用しない。
+                                              // 既存設定互換のため入力を保持する。
+input bool EnableTrendSuperTrendClose = true; // 旧トレンドSuperTrend直接決済設定。
+                                              // 新仕様ではSuperTrendを直接の決済条件として使用しない。
+                                              // SuperTrendはトレンド方向確認・エントリー判定等には引き続き使用する。
+input bool EnableTrendBBMiddleClose = true;  // トレンド時のM1 BB中央線逆方向クロスによる決済。
+                                              // BUYは上昇方向エントリー後にBB中央線を下方向へクロスした場合。
+                                              // SELLは下降方向エントリー後にBB中央線を上方向へクロスした場合。
+input bool EnableRangeTP            = true;  // レンジ時の反対側BB外側バンドTPを有効化。
+                                              // TP価格はエントリー約定時点のM1 BB外側バンド値で固定する。
+                                              // エントリー後にBBが移動してもTP価格は変更しない。
+input bool EnableStopLoss           = true;  // 保護用SLを有効化。
+                                              // 初期SL、トレンド時トレーリングSL、レンジ時の一度だけの利益確保SLに使用する。
+input int RangeMinProfitPoints      = 5;     // レンジ時の最低利益確保幅（Points）。
+                                              // BUYはBIDがエントリー価格＋この値を上回った時点で、
+                                              // SLをエントリー価格＋この値へ1回だけ移動する。
+                                              // SELLはASKがエントリー価格－この値を下回った時点で、
+                                              // SLをエントリー価格－この値へ1回だけ移動する。
+                                              // このレンジ利益確保SLは、1ポジションにつき最大1回だけ更新する。
+                                              // その後さらに利益が増えても、この方式ではSLを再更新しない。
 input bool EnableEntryOnCloseSignal = true;  // 決済シグナルと新規エントリーシグナルが同時成立した場合にエントリーを許可
 input bool EnableTrendTrading       = true;  // H1トレンド判定時の新規エントリーの許可
 input bool EnableRangeTrading       = true;  // H1レンジ判定時の新規エントリーの許可
@@ -1271,25 +1287,19 @@ public:
          g_closePriceSell = g_rangeClosePriceSell;
          g_closeBuyOnOrAbove = true;
          g_closeSellOnOrBelow = true;
-         g_rangeBBCloseBuy = true;
-         g_rangeBBCloseSell = true;
+         g_rangeBBCloseBuy = false;
+         g_rangeBBCloseSell = false;
       }
       else if (h1Type != TREND_UNKNOWN)
       {
-         g_trendSuperTrendClosePriceBuy = g_superTrend[1];
-         g_trendSuperTrendClosePriceSell = g_superTrend[1];
-         g_closePriceBuy = g_trendSuperTrendClosePriceBuy;
-         g_closePriceSell = g_trendSuperTrendClosePriceSell;
-         g_closeBuyOnOrAbove = false;
-         g_closeSellOnOrBelow = false;
-         g_trendSuperTrendCloseBuy = true;
-         g_trendSuperTrendCloseSell = true;
+         g_closePriceBuy = g_bbMiddle[1];
+         g_closePriceSell = g_bbMiddle[1];
          g_trendBBMiddleClosePriceBuy = g_bbMiddle[1];
          g_trendBBMiddleClosePriceSell = g_bbMiddle[1];
          double close1 = iClose(_Symbol, PERIOD_M1, 1);
          double close2 = iClose(_Symbol, PERIOD_M1, 2);
-         g_trendBBMiddleCloseBuy = close2 < g_bbMiddle[2] && close1 >= g_bbMiddle[1];
-         g_trendBBMiddleCloseSell = close2 > g_bbMiddle[2] && close1 <= g_bbMiddle[1];
+         g_trendBBMiddleCloseBuy = close2 >= g_bbMiddle[2] && close1 < g_bbMiddle[1];
+         g_trendBBMiddleCloseSell = close2 <= g_bbMiddle[2] && close1 > g_bbMiddle[1];
       }
    }
 
@@ -1573,6 +1583,57 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
    return (true);
 }
 
+void UpdateRangeMinimumProfitStops()
+{
+   if (!EnableStopLoss || !g_h1AllOk || !g_m1AllOk)
+      return;
+   if (g_TrendTypeH != TREND_RANGE)
+      return;
+
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double stopsLevelDistance = stopsLevel * _Point;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if (bid <= 0.0 || ask <= 0.0)
+      return;
+
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(ticket) || PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      long ptype = PositionGetInteger(POSITION_TYPE);
+      double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      if (entryPrice <= 0.0)
+         continue;
+
+      if (ptype == POSITION_TYPE_BUY)
+      {
+         double targetProfit = entryPrice + RangeMinProfitPoints * _Point;
+         if (bid > targetProfit && currentSL < targetProfit)
+         {
+            double candidateSL = NormalizeDouble(targetProfit, _Digits);
+            double entryToTarget = MathAbs(candidateSL - entryPrice);
+            if (entryToTarget >= stopsLevelDistance && candidateSL > currentSL)
+               ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP));
+         }
+      }
+      else if (ptype == POSITION_TYPE_SELL)
+      {
+         double targetProfit = entryPrice - RangeMinProfitPoints * _Point;
+         if (ask < targetProfit && currentSL > targetProfit)
+         {
+            double candidateSL = NormalizeDouble(targetProfit, _Digits);
+            double entryToTarget = MathAbs(candidateSL - entryPrice);
+            if (entryToTarget >= stopsLevelDistance && candidateSL < currentSL)
+               ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP));
+         }
+      }
+   }
+}
+
 void UpdateTrailingStops()
 {
    if (!EnableStopLoss || !g_h1AllOk || !g_m1AllOk ||
@@ -1581,7 +1642,8 @@ void UpdateTrailingStops()
        !IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0)
       return;
 
-   double slDistance = MathMax(g_atr[1] * atrMultiplierTrail, SL_Points * _Point);
+   double stopsLevelDistance = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double slDistance = MathMax(MathMax(g_atr[1] * atrMultiplierTrail, SL_Points * _Point), stopsLevelDistance);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    if (bid <= 0.0 || ask <= 0.0)
@@ -1602,8 +1664,7 @@ void UpdateTrailingStops()
       else if (ptype == POSITION_TYPE_SELL)
       {
          double candidateSL = NormalizeDouble(ask + slDistance, _Digits);
-         if ((currentSL == 0.0 || candidateSL < currentSL) &&
-             (currentSL == 0.0 || currentSL - candidateSL >= MinSLUpdatePoints * _Point))
+         if (candidateSL < currentSL && currentSL - candidateSL >= MinSLUpdatePoints * _Point)
             ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP));
       }
    }
@@ -1936,12 +1997,12 @@ string BuildCloseReason(bool stochasticCondition, bool rangeBBCondition, bool tr
    string reason = "";
    if (stochasticCondition)
       reason += "Stochastic過熱域クロス/反転";
+   if (trendBBMiddleCondition)
+      reason += reason == "" ? "トレンドBB中央線" : ", トレンドBB中央線";
    if (rangeBBCondition)
       reason += reason == "" ? "レンジBB逆側" : ", レンジBB逆側";
    if (trendSuperTrendCondition)
       reason += reason == "" ? "トレンドSuperTrend" : ", トレンドSuperTrend";
-   if (trendBBMiddleCondition)
-      reason += reason == "" ? "トレンドBB中央線" : ", トレンドBB中央線";
    return reason == "" ? "不明" : reason;
 }
 
@@ -1965,11 +2026,8 @@ string LogSuperTrendDirection(int index)
 
 void EvaluateCloseConditions(bool isBuy, double currentPrice, bool &stochasticCondition, bool &rangeBBCondition, bool &trendSuperTrendCondition, bool &trendBBMiddleCondition)
 {
-   double closePrice = isBuy ? g_closePriceBuy : g_closePriceSell;
-   bool priceReached = isBuy ? (g_closeBuyOnOrAbove ? currentPrice >= closePrice : currentPrice <= closePrice) // 決済価格到達状態
-                             : (g_closeSellOnOrBelow ? currentPrice <= closePrice : currentPrice >= closePrice);
-   rangeBBCondition = EnableRangeBBClose && (isBuy ? g_rangeBBCloseBuy : g_rangeBBCloseSell) && priceReached;
-   trendSuperTrendCondition = EnableTrendSuperTrendClose && (isBuy ? g_trendSuperTrendCloseBuy : g_trendSuperTrendCloseSell) && priceReached;
+   rangeBBCondition = false;
+   trendSuperTrendCondition = false;
    stochasticCondition = EnableStochasticClose && (isBuy ? g_stochasticCloseBuy : g_stochasticCloseSell);
    trendBBMiddleCondition = EnableTrendBBMiddleClose && (isBuy ? g_trendBBMiddleCloseBuy : g_trendBBMiddleCloseSell);
 }
@@ -2120,11 +2178,12 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
    double price = currentPrice;
    if (EnableStopLoss && (!IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0))
       return;
-   double slDistance = MathMax(g_atr[1] * atrMultiplierSL, SL_Points * _Point);
+   double stopsLevelDistance = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double slDistance = MathMax(MathMax(g_atr[1] * atrMultiplierSL, SL_Points * _Point), stopsLevelDistance);
    double sl = EnableStopLoss ? NormalizeDouble(isBuy ? (price - slDistance) : (price + slDistance), _Digits) : 0.0;
    double tp = 0.0;
    if (g_TrendTypeH == TREND_RANGE && EnableRangeTP)
-      tp = isBuy ? (price + SL_Points * RiskRewardRatio * _Point) : (price - SL_Points * RiskRewardRatio * _Point);
+      tp = isBuy ? g_bbUpper[1] : g_bbLower[1];
 
    double lot = BaseLot;
    if (g_TrendTypeH == TREND_RANGE)
@@ -2217,6 +2276,7 @@ void OnTick()
    }
    ClosePositions(g_canCloseBuy, POSITION_TYPE_BUY, g_closePriceBuy, BID);
    ClosePositions(g_canCloseSell, POSITION_TYPE_SELL, g_closePriceSell, ASK);
+   UpdateRangeMinimumProfitStops();
 
    bool buyCloseSignal = false;
    bool sellCloseSignal = false;
