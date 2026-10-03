@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.31"
+#property version   "3.32"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -30,20 +30,12 @@ input int SL_Points                 = 40;    // 逆指値（StopLoss）の最低
 input int MinSLUpdatePoints         = 1;     // SL更新を実行する際の最低価格差（Points）（現在のSLと新しいSLの差がこの値未満の場合はSLを更新しない）
 input double RiskRewardRatio        = 2.0;   // リスク・リワード比率（TP幅をSL幅の何倍にするか）（現在のレンジTP計算では使用しない）
 input bool EnableStochasticClose    = true;  // Stochasticによる決済を有効/無効（トレンド・レンジ時の両方で同じ判定を使用する）
-input bool EnableRangeBBClose       = true;  // 旧レンジBB逆側決済設定。
-                                              // 新仕様ではレンジTPをエントリー時の反対側外側BBに変更したため使用しない。
-                                              // 既存設定互換のため入力を保持する。
-input bool EnableTrendSuperTrendClose = true; // 旧トレンドSuperTrend直接決済設定。
-                                              // 新仕様ではSuperTrendを直接の決済条件として使用しない。
-                                              // SuperTrendはトレンド方向確認・エントリー判定等には引き続き使用する。
 input bool EnableTrendBBMiddleClose = true;  // トレンド時のM1 BB中央線逆方向クロスによる決済。
                                               // BUYは上昇方向エントリー後にBB中央線を下方向へクロスした場合。
                                               // SELLは下降方向エントリー後にBB中央線を上方向へクロスした場合。
 input bool EnableRangeTP            = true;  // レンジ時の反対側BB外側バンドTPを有効化。
                                               // TP価格はエントリー約定時点のM1 BB外側バンド値で固定する。
                                               // エントリー後にBBが移動してもTP価格は変更しない。
-input bool EnableStopLoss           = true;  // 保護用SLを有効化。
-                                              // 初期SL、トレンド時トレーリングSL、レンジ時の一度だけの利益確保SLに使用する。
 input int RangeMinProfitPoints      = 5;     // レンジ時の最低利益確保幅（Points）。
                                               // BUYはBIDがエントリー価格＋この値を上回った時点で、
                                               // SLをエントリー価格＋この値へ1回だけ移動する。
@@ -208,10 +200,6 @@ double g_previousBid = 0.0;            // Pullback/Reacceleration前回判定BID
 // M1 で判定した決済価格を保持（OnTimer 設定、OnTick で比較）
 double g_closePriceBuy = 0.0;       // BUY決済判定に使用する基準価格
 double g_closePriceSell = 0.0;      // SELL決済判定に使用する基準価格
-double g_rangeClosePriceBuy = 0.0;  // レンジBUY決済用BB上限価格
-double g_rangeClosePriceSell = 0.0; // レンジSELL決済用BB下限価格
-double g_trendSuperTrendClosePriceBuy = 0.0;    // トレンドBUY決済用SuperTrend価格
-double g_trendSuperTrendClosePriceSell = 0.0;   // トレンドSELL決済用SuperTrend価格
 double g_trendBBMiddleClosePriceBuy = 0.0;   // BUY決済用BB中央線価格
 double g_trendBBMiddleClosePriceSell = 0.0;  // SELL決済用BB中央線価格
 
@@ -231,14 +219,11 @@ bool g_closeBuyOnOrAbove = false;   // BUY決済価格を上抜け/以上で判�
 bool g_closeSellOnOrBelow = false;  // SELL決済価格を下抜け/以下で判定するか
 bool g_stochasticCloseBuy = false;  // BUYのStochastic決済条件
 bool g_stochasticCloseSell = false; // SELLのStochastic決済条件
-bool g_rangeBBCloseBuy = false;     // BUYのレンジBB決済条件
-bool g_rangeBBCloseSell = false;    // SELLのレンジBB決済条件
-bool g_trendSuperTrendCloseBuy = false;   // BUYのTrend SuperTrend決済条件
-bool g_trendSuperTrendCloseSell = false;  // SELLのTrend SuperTrend決済条件
 bool g_trendBBMiddleCloseBuy = false;  // BUYのTrend BB中央線決済条件
 bool g_trendBBMiddleCloseSell = false; // SELLのTrend BB中央線決済条件
 int g_closeAnalysisMaskBuy = -1;    // BUY決済条件解析ログの直前状態
 int g_closeAnalysisMaskSell = -1;   // SELL決済条件解析ログの直前状態
+ulong g_rangeMinProfitStopTickets[]; // レンジ最低利益確保SLを設定済みのポジションチケット
 
 // エントリー判定フラグ：ブレイク後リトレース用
 bool g_entryThresholdCrossedBuy = false;   // BUY エントリー閾値超えフラグ（初期OFF）
@@ -1253,18 +1238,10 @@ public:
    {
       g_closePriceBuy = 0.0;
       g_closePriceSell = 0.0;
-      g_rangeClosePriceBuy = 0.0;
-      g_rangeClosePriceSell = 0.0;
-      g_trendSuperTrendClosePriceBuy = 0.0;
-      g_trendSuperTrendClosePriceSell = 0.0;
       g_trendBBMiddleClosePriceBuy = 0.0;
       g_trendBBMiddleClosePriceSell = 0.0;
       g_stochasticCloseBuy = false;
       g_stochasticCloseSell = false;
-      g_rangeBBCloseBuy = false;
-      g_rangeBBCloseSell = false;
-      g_trendSuperTrendCloseBuy = false;
-      g_trendSuperTrendCloseSell = false;
       g_trendBBMiddleCloseBuy = false;
       g_trendBBMiddleCloseSell = false;
       g_closeBuyOnOrAbove = false;
@@ -1281,14 +1258,10 @@ public:
 
       if (h1Type == TREND_RANGE)
       {
-         g_rangeClosePriceBuy = g_bbUpper[1];
-         g_rangeClosePriceSell = g_bbLower[1];
-         g_closePriceBuy = g_rangeClosePriceBuy;
-         g_closePriceSell = g_rangeClosePriceSell;
+         g_closePriceBuy = g_bbUpper[1];
+         g_closePriceSell = g_bbLower[1];
          g_closeBuyOnOrAbove = true;
          g_closeSellOnOrBelow = true;
-         g_rangeBBCloseBuy = false;
-         g_rangeBBCloseSell = false;
       }
       else if (h1Type != TREND_UNKNOWN)
       {
@@ -1583,15 +1556,32 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
    return (true);
 }
 
+bool HasRangeMinProfitStop(ulong ticket)
+{
+   for (int i = 0; i < ArraySize(g_rangeMinProfitStopTickets); i++)
+   {
+      if (g_rangeMinProfitStopTickets[i] == ticket)
+         return true;
+   }
+   return false;
+}
+
+void RegisterRangeMinProfitStop(ulong ticket)
+{
+   if (HasRangeMinProfitStop(ticket))
+      return;
+   int size = ArraySize(g_rangeMinProfitStopTickets);
+   ArrayResize(g_rangeMinProfitStopTickets, size + 1);
+   g_rangeMinProfitStopTickets[size] = ticket;
+}
+
 void UpdateRangeMinimumProfitStops()
 {
-   if (!EnableStopLoss || !g_h1AllOk || !g_m1AllOk)
+   if (!g_h1AllOk || !g_m1AllOk)
       return;
    if (g_TrendTypeH != TREND_RANGE)
       return;
 
-   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   double stopsLevelDistance = stopsLevel * _Point;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    if (bid <= 0.0 || ask <= 0.0)
@@ -1608,35 +1598,36 @@ void UpdateRangeMinimumProfitStops()
       double currentSL = PositionGetDouble(POSITION_SL);
       if (entryPrice <= 0.0)
          continue;
+      if (HasRangeMinProfitStop(ticket))
+         continue;
 
+      double stopsLevelDistance = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
       if (ptype == POSITION_TYPE_BUY)
       {
-         double targetProfit = entryPrice + RangeMinProfitPoints * _Point;
-         if (bid > targetProfit && currentSL < targetProfit)
-         {
-            double candidateSL = NormalizeDouble(targetProfit, _Digits);
-            double entryToTarget = MathAbs(candidateSL - entryPrice);
-            if (entryToTarget >= stopsLevelDistance && candidateSL > currentSL)
-               ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP));
-         }
+         double targetSL = entryPrice + RangeMinProfitPoints * _Point;
+         bool eligible = bid > targetSL && (bid - targetSL) >= stopsLevelDistance && currentSL < targetSL;
+         if (!eligible)
+            continue;
+         double candidateSL = NormalizeDouble(targetSL, _Digits);
+         if (candidateSL > currentSL && ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP)))
+            RegisterRangeMinProfitStop(ticket);
       }
       else if (ptype == POSITION_TYPE_SELL)
       {
-         double targetProfit = entryPrice - RangeMinProfitPoints * _Point;
-         if (ask < targetProfit && currentSL > targetProfit)
-         {
-            double candidateSL = NormalizeDouble(targetProfit, _Digits);
-            double entryToTarget = MathAbs(candidateSL - entryPrice);
-            if (entryToTarget >= stopsLevelDistance && candidateSL < currentSL)
-               ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP));
-         }
+         double targetSL = entryPrice - RangeMinProfitPoints * _Point;
+         bool eligible = ask < targetSL && (targetSL - ask) >= stopsLevelDistance && currentSL > targetSL;
+         if (!eligible)
+            continue;
+         double candidateSL = NormalizeDouble(targetSL, _Digits);
+         if (candidateSL < currentSL && ModifyPositionSLTP(ticket, candidateSL, PositionGetDouble(POSITION_TP)))
+            RegisterRangeMinProfitStop(ticket);
       }
    }
 }
 
 void UpdateTrailingStops()
 {
-   if (!EnableStopLoss || !g_h1AllOk || !g_m1AllOk ||
+   if (!g_h1AllOk || !g_m1AllOk ||
        (g_TrendTypeH != TREND_STRONG_UP && g_TrendTypeH != TREND_WEAK_UP &&
         g_TrendTypeH != TREND_STRONG_DOWN && g_TrendTypeH != TREND_WEAK_DOWN) ||
        !IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0)
@@ -1918,16 +1909,12 @@ int OnInit()
 
    // 価格・フラグ変数の初期化
    g_closePriceBuy = g_closePriceSell = 0.0;
-   g_rangeClosePriceBuy = g_rangeClosePriceSell = 0.0;
-   g_trendSuperTrendClosePriceBuy = g_trendSuperTrendClosePriceSell = 0.0;
    g_trendBBMiddleClosePriceBuy = g_trendBBMiddleClosePriceSell = 0.0;
    g_entryPriceBuy = g_entryPriceSell = 0.0;
    g_canEntryBuy = g_canEntrySell = false;
    g_canCloseBuy = g_canCloseSell = false;
    g_entryThresholdCrossedBuy = g_entryThresholdCrossedSell = false;
    g_stochasticCloseBuy = g_stochasticCloseSell = false;
-   g_rangeBBCloseBuy = g_rangeBBCloseSell = false;
-   g_trendSuperTrendCloseBuy = g_trendSuperTrendCloseSell = false;
    g_trendBBMiddleCloseBuy = g_trendBBMiddleCloseSell = false;
    g_closeAnalysisMaskBuy = g_closeAnalysisMaskSell = -1;
    g_weekendEntryStopped = false;
@@ -1992,17 +1979,13 @@ void OnDeinit(const int reason)
 // ヘルパー関数: 決済処理
 // グローバル変数 g_canCloseBuy/Sell と決済条件を使用
 // ===================================================================
-string BuildCloseReason(bool stochasticCondition, bool rangeBBCondition, bool trendSuperTrendCondition, bool trendBBMiddleCondition)
+string BuildCloseReason(bool stochasticCondition, bool trendBBMiddleCondition)
 {
    string reason = "";
    if (stochasticCondition)
       reason += "Stochastic過熱域クロス/反転";
    if (trendBBMiddleCondition)
       reason += reason == "" ? "トレンドBB中央線" : ", トレンドBB中央線";
-   if (rangeBBCondition)
-      reason += reason == "" ? "レンジBB逆側" : ", レンジBB逆側";
-   if (trendSuperTrendCondition)
-      reason += reason == "" ? "トレンドSuperTrend" : ", トレンドSuperTrend";
    return reason == "" ? "不明" : reason;
 }
 
@@ -2024,20 +2007,18 @@ string LogSuperTrendDirection(int index)
    return "不明";
 }
 
-void EvaluateCloseConditions(bool isBuy, double currentPrice, bool &stochasticCondition, bool &rangeBBCondition, bool &trendSuperTrendCondition, bool &trendBBMiddleCondition)
+void EvaluateCloseConditions(bool isBuy, double currentPrice, bool &stochasticCondition, bool &trendBBMiddleCondition)
 {
-   rangeBBCondition = false;
-   trendSuperTrendCondition = false;
    stochasticCondition = EnableStochasticClose && (isBuy ? g_stochasticCloseBuy : g_stochasticCloseSell);
    trendBBMiddleCondition = EnableTrendBBMiddleClose && (isBuy ? g_trendBBMiddleCloseBuy : g_trendBBMiddleCloseSell);
 }
 
-void LogCloseConditionAnalysis(bool isBuy, double currentPrice, bool stochasticCondition, bool rangeBBCondition, bool trendSuperTrendCondition, bool trendBBMiddleCondition)
+void LogCloseConditionAnalysis(bool isBuy, double currentPrice, bool stochasticCondition, bool trendBBMiddleCondition)
 {
-   PrintFormat("決済条件成立解析 time=%s type=%s price=%.5f Stochastic=%s RangeBB=%s TrendSuperTrend=%s TrendBB中央線=%s reason=%s M1確定足=%s StochK=%.3f StochD=%.3f BB上=%.5f BB中=%.5f BB下=%.5f SuperTrend=%.5f SuperTrend方向=%s",
+   PrintFormat("決済条件成立解析 time=%s type=%s price=%.5f Stochastic=%s TrendBB中央線=%s reason=%s M1確定足=%s StochK=%.3f StochD=%.3f BB上=%.5f BB中=%.5f BB下=%.5f SuperTrend=%.5f SuperTrend方向=%s",
                TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), isBuy ? "BUY" : "SELL", currentPrice,
-               stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false",
-               BuildCloseReason(stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition),
+               stochasticCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false",
+               BuildCloseReason(stochasticCondition, trendBBMiddleCondition),
                TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), LogArrayValue(g_stochK, 1), LogArrayValue(g_stochD, 1),
                LogArrayValue(g_bbUpper, 1), LogArrayValue(g_bbMiddle, 1), LogArrayValue(g_bbLower, 1), LogArrayValue(g_superTrend, 1), LogSuperTrendDirection(1));
 }
@@ -2048,12 +2029,10 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
       return;
 
    bool isBuy = (posType == POSITION_TYPE_BUY);
-   bool rangeBBCondition = false;
-   bool trendSuperTrendCondition = false;
    bool stochasticCondition = false;
    bool trendBBMiddleCondition = false;
-   EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
-   bool condition = rangeBBCondition || trendSuperTrendCondition || stochasticCondition || trendBBMiddleCondition;
+   EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, trendBBMiddleCondition);
+   bool condition = stochasticCondition || trendBBMiddleCondition;
    if (!condition)
    {
       if (isBuy)
@@ -2063,11 +2042,11 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
       return;
    }
 
-   string reason = BuildCloseReason(stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
-   int conditionMask = (stochasticCondition ? 1 : 0) | (rangeBBCondition ? 2 : 0) | (trendSuperTrendCondition ? 4 : 0) | (trendBBMiddleCondition ? 8 : 0);
+   string reason = BuildCloseReason(stochasticCondition, trendBBMiddleCondition);
+   int conditionMask = (stochasticCondition ? 1 : 0) | (trendBBMiddleCondition ? 2 : 0);
    if ((isBuy && conditionMask != g_closeAnalysisMaskBuy) || (!isBuy && conditionMask != g_closeAnalysisMaskSell))
    {
-      LogCloseConditionAnalysis(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
+      LogCloseConditionAnalysis(isBuy, currentPrice, stochasticCondition, trendBBMiddleCondition);
       if (isBuy)
          g_closeAnalysisMaskBuy = conditionMask;
       else
@@ -2092,7 +2071,7 @@ void ClosePositions(bool canClose, ENUM_POSITION_TYPE posType, double closePrice
 
       if (ClosePositionByTicket(ticket, reason))
       {
-         PrintFormat("決済条件状態 type=%s Stochastic=%s RangeBB=%s TrendSuperTrend=%s TrendBB中央線=%s", isBuy ? "BUY" : "SELL", stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
+         PrintFormat("決済条件状態 type=%s Stochastic=%s TrendBB中央線=%s", isBuy ? "BUY" : "SELL", stochasticCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
          if (isBuy)
             g_lastBuyCloseBarTime = LastM1;
          else
@@ -2176,14 +2155,25 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       return;
 
    double price = currentPrice;
-   if (EnableStopLoss && (!IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0))
+   if (!IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0)
       return;
    double stopsLevelDistance = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double slDistance = MathMax(MathMax(g_atr[1] * atrMultiplierSL, SL_Points * _Point), stopsLevelDistance);
-   double sl = EnableStopLoss ? NormalizeDouble(isBuy ? (price - slDistance) : (price + slDistance), _Digits) : 0.0;
+   double sl = NormalizeDouble(isBuy ? (price - slDistance) : (price + slDistance), _Digits);
    double tp = 0.0;
    if (g_TrendTypeH == TREND_RANGE && EnableRangeTP)
+   {
       tp = isBuy ? g_bbUpper[1] : g_bbLower[1];
+      if (isBuy)
+      {
+         if (tp - ask < stopsLevelDistance)
+            return;
+      }
+      else if (bid - tp < stopsLevelDistance)
+      {
+         return;
+      }
+   }
 
    double lot = BaseLot;
    if (g_TrendTypeH == TREND_RANGE)
@@ -2283,20 +2273,16 @@ void OnTick()
    if (g_canCloseBuy && g_closePriceBuy > 0)
    {
       bool stochasticCondition = false;
-      bool rangeBBCondition = false;
-      bool trendSuperTrendCondition = false;
       bool trendBBMiddleCondition = false;
-      EvaluateCloseConditions(true, BID, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
-      buyCloseSignal = rangeBBCondition || trendSuperTrendCondition || stochasticCondition || trendBBMiddleCondition;
+      EvaluateCloseConditions(true, BID, stochasticCondition, trendBBMiddleCondition);
+      buyCloseSignal = stochasticCondition || trendBBMiddleCondition;
    }
    if (g_canCloseSell && g_closePriceSell > 0)
    {
       bool stochasticCondition = false;
-      bool rangeBBCondition = false;
-      bool trendSuperTrendCondition = false;
       bool trendBBMiddleCondition = false;
-      EvaluateCloseConditions(false, ASK, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
-      sellCloseSignal = rangeBBCondition || trendSuperTrendCondition || stochasticCondition || trendBBMiddleCondition;
+      EvaluateCloseConditions(false, ASK, stochasticCondition, trendBBMiddleCondition);
+      sellCloseSignal = stochasticCondition || trendBBMiddleCondition;
    }
 
    UpdateTrailingStops();
@@ -2406,20 +2392,18 @@ void LogInAnalysis(ulong deal, ulong order, long dealType, datetime dealTime)
    }
    bool isBuy = dealType == DEAL_TYPE_BUY;
    bool stochasticCondition = false;
-   bool rangeBBCondition = false;
-   bool trendSuperTrendCondition = false;
    bool trendBBMiddleCondition = false;
    double currentPrice = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, rangeBBCondition, trendSuperTrendCondition, trendBBMiddleCondition);
+   EvaluateCloseConditions(isBuy, currentPrice, stochasticCondition, trendBBMiddleCondition);
    double macdMainValue = LogArrayValue(g_m15_macdMainAll, 1);
    double macdSignalValue = LogArrayValue(g_m15_macdSigAll, 1);
-   PrintFormat("IN解析 deal=%I64u order=%I64u type=%s price=%.5f lot=%.2f time=%s time_msc=%I64d magic=%I64d position=%I64u symbol=%s M1確定足=%s H1確定足=%s M15確定足=%s H1TrendType=%s H1TrendState=%s H1DI方向=%s H1EMA方向=%s M15RSI=%.3f M15MACDMain=%.5f M15MACDSignal=%.5f M15MACDHistogram=%.5f M15MACDCross=%s M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1StochK=%.3f M1StochD=%.3f M1ATR=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s 決済Stochastic=%s 決済RangeBB=%s 決済TrendSuperTrend=%s 決済TrendBB中央線=%s",
+   PrintFormat("IN解析 deal=%I64u order=%I64u type=%s price=%.5f lot=%.2f time=%s time_msc=%I64d magic=%I64d position=%I64u symbol=%s M1確定足=%s H1確定足=%s M15確定足=%s H1TrendType=%s H1TrendState=%s H1DI方向=%s H1EMA方向=%s M15RSI=%.3f M15MACDMain=%.5f M15MACDSignal=%.5f M15MACDHistogram=%.5f M15MACDCross=%s M1BB上=%.5f M1BB中=%.5f M1BB下=%.5f M1StochK=%.3f M1StochD=%.3f M1ATR=%.5f M1SuperTrend=%.5f M1SuperTrend方向=%s 決済Stochastic=%s 決済TrendBB中央線=%s",
                deal, order, isBuy ? "BUY" : "SELL", HistoryDealGetDouble(deal, DEAL_PRICE), HistoryDealGetDouble(deal, DEAL_VOLUME), TimeToString(dealTime, TIME_DATE | TIME_SECONDS), HistoryDealGetInteger(deal, DEAL_TIME_MSC), HistoryDealGetInteger(deal, DEAL_MAGIC), HistoryDealGetInteger(deal, DEAL_POSITION_ID), HistoryDealGetString(deal, DEAL_SYMBOL),
                TimeToString(iTime(_Symbol, PERIOD_M1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_H1, 1), TIME_DATE | TIME_SECONDS), TimeToString(iTime(_Symbol, PERIOD_M15, 1), TIME_DATE | TIME_SECONDS),
                TrendTypeToString(g_TrendTypeH), TrendStateToString(g_TrendStateH), g_H1DiDir > 0 ? "上" : g_H1DiDir < 0 ? "下" : "不明", g_H1EmaDir > 0 ? "上" : g_H1EmaDir < 0 ? "下" : "不明",
                LogArrayValue(g_m15_rsiArr, 1), macdMainValue, macdSignalValue, macdMainValue - macdSignalValue, MACDCrossDirToString(g_M15Signal.hasMACDCross ? g_M15Signal.macdCrossDir : 0),
                LogArrayValue(g_bbUpper, 1), LogArrayValue(g_bbMiddle, 1), LogArrayValue(g_bbLower, 1), LogArrayValue(g_stochK, 1), LogArrayValue(g_stochD, 1), LogArrayValue(g_atr, 1), LogArrayValue(g_superTrend, 1), LogSuperTrendDirection(1),
-               stochasticCondition ? "true" : "false", rangeBBCondition ? "true" : "false", trendSuperTrendCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
+               stochasticCondition ? "true" : "false", trendBBMiddleCondition ? "true" : "false");
 }
 
 void LogOutAnalysis(ulong deal, ulong order, long positionType, long dealReason, datetime dealTime, ulong positionId)
