@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.33"
+#property version   "3.34"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -14,7 +14,6 @@ CTrade trade;
 // 定数（コンパイル時定数）
 // ===================================================================
 #define INDICATOR_BARS 14      // 指標・価格系列の共通取得本数
-#define DIVERGENCE_PERIOD INDICATOR_BARS // 将来のダイバージェンス検出用のデータ期間
 #define MAX_HISTORY 100        // トレード履歴の最大記録数（100件）
 #define SUPERTREND_INIT_BARS 50 // SuperTrend初期化用のM1履歴本数
 
@@ -66,6 +65,7 @@ int emaLongPeriod  = 50;            // 長期EMA周期
 int rsiPeriod = 14;                 // RSI周期
 int rsiOverbought = 70;             // RSI買われすぎ閾値
 int rsiOversold = 30;               // RSI売られすぎ閾値
+int divergencePeriod = INDICATOR_BARS; // ダイバージェンス判定に使用するデータ期間
 int macdFast = 12, macdSlow = 26, macdSignal = 9;  // MACD周期（高速・低速・シグナル）
 
 int bbPeriod = 20;                  // ボリンジャーバンド周期
@@ -91,7 +91,6 @@ int initialBreakoutLookback = 20;   // 初動ブレイク判定の過去M1高値
 double initialBreakoutMinBBATR = 3.0; // 初動ブレイク時の最小BB幅/ATR比率
 double initialBreakoutMaxExtensionATR = 2.0; // 初動ブレイク時の過度な伸び許容値
 int continuationLookback = 10;      // トレンド継続判定の参照本数
-int continuationMomentumBars = 3;   // トレンド継続時のモメンタム判定に使う本数
 double continuationMinBBATR = 4.0; // トレンド継続時の最小BB幅/ATR比率
 double continuationMinDistanceATR = 0.3; // トレンド継続時のBB中値からの最低距離
 double continuationMaxExtensionATR = 1.5; // トレンド継続時の過度な伸び許容値
@@ -208,8 +207,8 @@ bool g_superTrendPullbackBuy = false;  // BUY Pullback成立フラグ
 bool g_superTrendPullbackSell = false; // SELL Pullback成立フラグ
 bool g_superTrendReaccelBuy = false;   // BUY Reacceleration成立フラグ
 bool g_superTrendReaccelSell = false;  // SELL Reacceleration成立フラグ
-bool g_superTrendFlipBuy = false;      // BUY方向SuperTrend反転フラグ
-bool g_superTrendFlipSell = false;     // SELL方向SuperTrend反転フラグ
+bool g_superTrendFlipBuy = false;      // BUY方向SuperTrend反転フラグ（現在はエントリー条件として未実装・未使用）
+bool g_superTrendFlipSell = false;     // SELL方向SuperTrend反転フラグ（現在はエントリー条件として未実装・未使用）
 EntrySignalType g_lastTrendEntrySignalBuy = ENTRY_SIGNAL_NONE;   // BUYの最新トレンドエントリーシグナル
 EntrySignalType g_lastTrendEntrySignalSell = ENTRY_SIGNAL_NONE;  // SELLの最新トレンドエントリーシグナル
 double g_previousAsk = 0.0;            // Pullback/Reacceleration前回判定ASK
@@ -678,19 +677,19 @@ DivergenceType CheckDivergenceSeries(const double &price[], const double &indica
 DivergenceType CalculateRsiDivergence(int rsiHandle)
 {
    double priceHigh[], priceLow[], rsiSeries[];
-   ArrayResize(priceHigh, DIVERGENCE_PERIOD);
-   ArrayResize(priceLow, DIVERGENCE_PERIOD);
-   ArrayResize(rsiSeries, DIVERGENCE_PERIOD);
+   ArrayResize(priceHigh, divergencePeriod);
+   ArrayResize(priceLow, divergencePeriod);
+   ArrayResize(rsiSeries, divergencePeriod);
    ArraySetAsSeries(priceHigh, true);
    ArraySetAsSeries(priceLow, true);
    ArraySetAsSeries(rsiSeries, true);
-      if (CopyHigh(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceHigh) != DIVERGENCE_PERIOD ||
-         CopyLow(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceLow) != DIVERGENCE_PERIOD ||
-         CopyBuffer(rsiHandle, 0, 0, DIVERGENCE_PERIOD, rsiSeries) != DIVERGENCE_PERIOD)
+      if (CopyHigh(_Symbol, PERIOD_M15, 0, divergencePeriod, priceHigh) != divergencePeriod ||
+         CopyLow(_Symbol, PERIOD_M15, 0, divergencePeriod, priceLow) != divergencePeriod ||
+         CopyBuffer(rsiHandle, 0, 0, divergencePeriod, rsiSeries) != divergencePeriod)
       return DIVERGENCE_NONE;
 
-   DivergenceType highResult = CheckDivergenceSeries(priceHigh, rsiSeries, DIVERGENCE_PERIOD, true, true);
-   DivergenceType lowResult = CheckDivergenceSeries(priceLow, rsiSeries, DIVERGENCE_PERIOD, false, true);
+   DivergenceType highResult = CheckDivergenceSeries(priceHigh, rsiSeries, divergencePeriod, true, true);
+   DivergenceType lowResult = CheckDivergenceSeries(priceLow, rsiSeries, divergencePeriod, false, true);
    if ((highResult == DIVERGENCE_BEARISH && lowResult == DIVERGENCE_BULLISH) ||
        (highResult == DIVERGENCE_BULLISH && lowResult == DIVERGENCE_BEARISH))
       return DIVERGENCE_CONFLICT;
@@ -702,25 +701,26 @@ DivergenceType CalculateRsiDivergence(int rsiHandle)
 DivergenceType CalculateMacdDivergence(int macdHandle)
 {
    double priceHigh[], priceLow[], macdMain[], macdSignalBuffer[];
-   ArrayResize(priceHigh, DIVERGENCE_PERIOD);
-   ArrayResize(priceLow, DIVERGENCE_PERIOD);
-   ArrayResize(macdMain, DIVERGENCE_PERIOD);
-   ArrayResize(macdSignalBuffer, DIVERGENCE_PERIOD);
+   ArrayResize(priceHigh, divergencePeriod);
+   ArrayResize(priceLow, divergencePeriod);
+   ArrayResize(macdMain, divergencePeriod);
+   ArrayResize(macdSignalBuffer, divergencePeriod);
    ArraySetAsSeries(priceHigh, true);
    ArraySetAsSeries(priceLow, true);
    ArraySetAsSeries(macdMain, true);
    ArraySetAsSeries(macdSignalBuffer, true);
-      if (CopyHigh(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceHigh) != DIVERGENCE_PERIOD ||
-         CopyLow(_Symbol, PERIOD_M15, 0, DIVERGENCE_PERIOD, priceLow) != DIVERGENCE_PERIOD ||
-         CopyBuffer(macdHandle, 0, 0, DIVERGENCE_PERIOD, macdMain) != DIVERGENCE_PERIOD ||
-         CopyBuffer(macdHandle, 1, 0, DIVERGENCE_PERIOD, macdSignalBuffer) != DIVERGENCE_PERIOD)
+      if (CopyHigh(_Symbol, PERIOD_M15, 0, divergencePeriod, priceHigh) != divergencePeriod ||
+         CopyLow(_Symbol, PERIOD_M15, 0, divergencePeriod, priceLow) != divergencePeriod ||
+         CopyBuffer(macdHandle, 0, 0, divergencePeriod, macdMain) != divergencePeriod ||
+         CopyBuffer(macdHandle, 1, 0, divergencePeriod, macdSignalBuffer) != divergencePeriod)
       return DIVERGENCE_NONE;
 
-   double histogram[DIVERGENCE_PERIOD];
-   for (int i = 0; i < DIVERGENCE_PERIOD; i++)
+   double histogram[];
+   ArrayResize(histogram, divergencePeriod);
+   for (int i = 0; i < divergencePeriod; i++)
       histogram[i] = macdMain[i] - macdSignalBuffer[i];
-   DivergenceType highResult = CheckDivergenceSeries(priceHigh, histogram, DIVERGENCE_PERIOD, true, true);
-   DivergenceType lowResult = CheckDivergenceSeries(priceLow, histogram, DIVERGENCE_PERIOD, false, true);
+   DivergenceType highResult = CheckDivergenceSeries(priceHigh, histogram, divergencePeriod, true, true);
+   DivergenceType lowResult = CheckDivergenceSeries(priceLow, histogram, divergencePeriod, false, true);
    if ((highResult == DIVERGENCE_BEARISH && lowResult == DIVERGENCE_BULLISH) ||
        (highResult == DIVERGENCE_BULLISH && lowResult == DIVERGENCE_BEARISH))
       return DIVERGENCE_CONFLICT;
@@ -1027,22 +1027,23 @@ public:
       }
       double m1High[], m1Low[], m1Close[];
       ArraySetAsSeries(m1High, true); ArraySetAsSeries(m1Low, true); ArraySetAsSeries(m1Close, true);
+      int breakoutPriceBars = (int)MathMax(INDICATOR_BARS, initialBreakoutLookback + 2);
       ResetLastError();
-      int highCopied = CopyHigh(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1High);
+      int highCopied = CopyHigh(_Symbol, PERIOD_M1, 0, breakoutPriceBars, m1High);
       int highError = GetLastError();
       ResetLastError();
-      int lowCopied = CopyLow(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Low);
+      int lowCopied = CopyLow(_Symbol, PERIOD_M1, 0, breakoutPriceBars, m1Low);
       int lowError = GetLastError();
       ResetLastError();
-      int closeCopied = CopyClose(_Symbol, PERIOD_M1, 0, INDICATOR_BARS, m1Close);
+      int closeCopied = CopyClose(_Symbol, PERIOD_M1, 0, breakoutPriceBars, m1Close);
       int closeError = GetLastError();
-      bool pricesOk = highCopied == INDICATOR_BARS && lowCopied == INDICATOR_BARS && closeCopied == INDICATOR_BARS &&
+      bool pricesOk = highCopied == breakoutPriceBars && lowCopied == breakoutPriceBars && closeCopied == breakoutPriceBars &&
                 ArePriceValuesValid(m1High) && ArePriceValuesValid(m1Low) && ArePriceValuesValid(m1Close);
       if (pricesOk)
       {
-         pricesOk = (ArrayCopy(g_m1High, m1High) == INDICATOR_BARS &&
-                     ArrayCopy(g_m1Low, m1Low) == INDICATOR_BARS &&
-                     ArrayCopy(g_m1Close, m1Close) == INDICATOR_BARS);
+         pricesOk = (ArrayCopy(g_m1High, m1High) == breakoutPriceBars &&
+                     ArrayCopy(g_m1Low, m1Low) == breakoutPriceBars &&
+                     ArrayCopy(g_m1Close, m1Close) == breakoutPriceBars);
          ArraySetAsSeries(g_m1High, true); ArraySetAsSeries(g_m1Low, true); ArraySetAsSeries(g_m1Close, true);
          // LogPriceValues("M1 High", m1High);
          // LogPriceValues("M1 Low", m1Low);
@@ -1050,7 +1051,7 @@ public:
       }
       else
       {
-         PrintFormat("M1価格取得失敗 High=%d/%d err=%d Low=%d/%d err=%d Close=%d/%d err=%d", highCopied, INDICATOR_BARS, highError, lowCopied, INDICATOR_BARS, lowError, closeCopied, INDICATOR_BARS, closeError);
+         PrintFormat("M1価格取得失敗 High=%d/%d err=%d Low=%d/%d err=%d Close=%d/%d err=%d", highCopied, breakoutPriceBars, highError, lowCopied, breakoutPriceBars, lowError, closeCopied, breakoutPriceBars, closeError);
          LogPriceValues("M1 High", m1High);
          LogPriceValues("M1 Low", m1Low);
          LogPriceValues("M1 Close", m1Close);
@@ -2055,7 +2056,9 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
 
    double bbWidth = g_bbUpper[1] - g_bbLower[1];
    double atr = g_atr[1];
-   if (ArraySize(g_m1Close) < 4 || ArraySize(g_m1High) < 4)
+   if (ArraySize(g_m1Close) < 4 ||
+       ArraySize(g_m1High) < initialBreakoutLookback + 2 ||
+       ArraySize(g_m1Low) < initialBreakoutLookback + 2)
       return signal;
 
    if (isBuy)
@@ -2070,19 +2073,19 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
       {
          if (bbWidth / atr >= initialBreakoutMinBBATR)
          {
-            int lookback = MathMin(initialBreakoutLookback, MathMax(0, ArraySize(g_m1High) - 2));
-            if (lookback > 0)
+            int breakoutLookback = initialBreakoutLookback;
+            double highestHigh = g_m1High[2];
+            for (int i = 3; i <= breakoutLookback + 1; i++)
             {
-               double highestHigh = g_m1High[2];
-               for (int i = 3; i <= lookback + 1 && i < ArraySize(g_m1High); i++)
-                  if (g_m1High[i] > highestHigh)
-                     highestHigh = g_m1High[i];
-               if (g_m1Close[1] > highestHigh && (g_m1Close[1] - g_bbMiddle[1]) <= atr * initialBreakoutMaxExtensionATR)
-               {
-                  signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
-                  g_lastTrendEntrySignalBuy = signal;
-                  return signal;
-               }
+               if (g_m1High[i] > highestHigh)
+                  highestHigh = g_m1High[i];
+            }
+            double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            if (currentAsk > highestHigh && (currentAsk - g_bbMiddle[1]) <= atr * initialBreakoutMaxExtensionATR)
+            {
+               signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
+               g_lastTrendEntrySignalBuy = signal;
+               return signal;
             }
          }
          if (bbWidth / atr >= continuationMinBBATR &&
@@ -2119,19 +2122,19 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
       {
          if (bbWidth / atr >= initialBreakoutMinBBATR)
          {
-            int lookback = MathMin(initialBreakoutLookback, MathMax(0, ArraySize(g_m1Low) - 2));
-            if (lookback > 0)
+            int breakoutLookback = initialBreakoutLookback;
+            double lowestLow = g_m1Low[2];
+            for (int i = 3; i <= breakoutLookback + 1; i++)
             {
-               double lowestLow = g_m1Low[2];
-               for (int i = 3; i <= lookback + 1 && i < ArraySize(g_m1Low); i++)
-                  if (g_m1Low[i] < lowestLow)
-                     lowestLow = g_m1Low[i];
-               if (g_m1Close[1] < lowestLow && (g_bbMiddle[1] - g_m1Close[1]) <= atr * initialBreakoutMaxExtensionATR)
-               {
-                  signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
-                  g_lastTrendEntrySignalSell = signal;
-                  return signal;
-               }
+               if (g_m1Low[i] < lowestLow)
+                  lowestLow = g_m1Low[i];
+            }
+            double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            if (currentBid < lowestLow && (g_bbMiddle[1] - currentBid) <= atr * initialBreakoutMaxExtensionATR)
+            {
+               signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
+               g_lastTrendEntrySignalSell = signal;
+               return signal;
             }
          }
          if (bbWidth / atr >= continuationMinBBATR &&

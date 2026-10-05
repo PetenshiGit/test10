@@ -142,7 +142,9 @@ SELLでは以下を満たす必要があります。
   - 既存のPullback/Reacceleration判定を維持し、`g_superTrendReaccelBuy/Sell`をエントリー条件として利用する。
   - `sameDirCount == 0` でも成立し得るが、M15追撃抑制は「同一方向ポジションが存在する場合」にのみ適用する。
 - 初動ブレイク
-  - H1のトレンド方向とDI/EMA方向が一致し、M1のBB幅が十分広く、直近高値/安値を確定足終値で突破した場合に成立する。
+  - H1のトレンド方向とDI/EMA方向、M1 SuperTrend方向が一致し、BB幅/ATRが`initialBreakoutMinBBATR`以上のときに評価する。
+  - `initialBreakoutLookback = 20`の場合、M1の[2]～[21]の高値/安値に対し、現在ASKが最高値を上回るか、現在BIDが最安値を下回ると成立する。BB中央線からの距離は`initialBreakoutMaxExtensionATR`以内とする。
+  - 現在価格で即時判定し、ブレイク維持や複数Tickの確認は行わない。
   - SuperTrend反転そのものはエントリー条件に使用しない。
 - トレンド継続
   - 強い一方向トレンドでBB幅が大きく、価格がBB中央線付近に留まりながら高値圏/安値圏を維持している場合に成立する。
