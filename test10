@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.34"
+#property version   "3.35"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -13,7 +13,7 @@ CTrade trade;
 // ===================================================================
 // 定数（コンパイル時定数）
 // ===================================================================
-#define INDICATOR_BARS 14      // 指標・価格系列の共通取得本数
+#define INDICATOR_BARS 25      // 指標・価格系列の共通取得本数
 #define MAX_HISTORY 100        // トレード履歴の最大記録数（100件）
 #define SUPERTREND_INIT_BARS 50 // SuperTrend初期化用のM1履歴本数
 
@@ -90,6 +90,9 @@ double lot_follow_trend = 0.5;      // 2ポジション目以降のトレンド�
 int initialBreakoutLookback = 20;   // 初動ブレイク判定の過去M1高値/安値参照本数
 double initialBreakoutMinBBATR = 3.0; // 初動ブレイク時の最小BB幅/ATR比率
 double initialBreakoutMaxExtensionATR = 2.0; // 初動ブレイク時の過度な伸び許容値
+double g_initialBreakoutHighestHigh = 0.0; // 初動ブレイク判定で使用する過去M1高値の最高値。M1価格データ更新時に存在する範囲から毎回再計算し、OnTickで現在ASKと比較する。
+double g_initialBreakoutLowestLow = 0.0; // 初動ブレイク判定で使用する過去M1安値の最安値。M1価格データ更新時に存在する範囲から毎回再計算し、OnTickで現在BIDと比較する。
+bool g_initialBreakoutPriceReady = false; // 初動ブレイク判定用の最高値・最安値をM1価格配列[2]以降から計算可能な状態かを示す。falseの場合は初動ブレイク判定だけをスキップする。
 int continuationLookback = 10;      // トレンド継続判定の参照本数
 double continuationMinBBATR = 4.0; // トレンド継続時の最小BB幅/ATR比率
 double continuationMinDistanceATR = 0.3; // トレンド継続時のBB中値からの最低距離
@@ -346,9 +349,10 @@ bool AreIndicatorValuesValid(const double &values[])
 
 bool ArePriceValuesValid(const double &values[])
 {
-   if (ArraySize(values) != INDICATOR_BARS)
+   int checkBars = MathMin(ArraySize(values), INDICATOR_BARS);
+   if (checkBars <= 0)
       return(false);
-   for (int i = 0; i < INDICATOR_BARS; i++)
+   for (int i = 0; i < checkBars; i++)
       if (!IsIndicatorValueValid(values[i]))
          return(false);
    return(true);
@@ -403,7 +407,7 @@ bool CopyBufferWithRetry(int handle, int buffer, double &values[], const string 
 
 void LogArrayCopyVerification(const string name, const double &local[], const double &global[])
 {
-   // 必要な検証時だけコメントを外して、local[0..13] と global[0..13] を比較する。
+   // 必要な検証時だけコメントを外して、local[0..24] と global[0..24] を比較する。
    // for (int i = 0; i < INDICATOR_BARS; i++)
    //    PrintFormat("%s[%d] local=%.10f global=%.10f", name, i, local[i], global[i]);
 }
@@ -475,6 +479,9 @@ void ResetM1Data()
    ArrayInitialize(g_stochK, EMPTY_VALUE);
    ArrayInitialize(g_stochD, EMPTY_VALUE);
    ArrayInitialize(g_atr, EMPTY_VALUE);
+   g_initialBreakoutHighestHigh = 0.0;
+   g_initialBreakoutLowestLow = 0.0;
+   g_initialBreakoutPriceReady = false;
    g_m1_bb_ok = false; g_m1_stoch_ok = false; g_m1_atr_ok = false;
    g_m1AllOk = false;
 }
@@ -1037,14 +1044,37 @@ public:
       ResetLastError();
       int closeCopied = CopyClose(_Symbol, PERIOD_M1, 0, breakoutPriceBars, m1Close);
       int closeError = GetLastError();
-      bool pricesOk = highCopied == breakoutPriceBars && lowCopied == breakoutPriceBars && closeCopied == breakoutPriceBars &&
-                ArePriceValuesValid(m1High) && ArePriceValuesValid(m1Low) && ArePriceValuesValid(m1Close);
+      g_initialBreakoutHighestHigh = 0.0;
+      g_initialBreakoutLowestLow = 0.0;
+      g_initialBreakoutPriceReady = false;
+      bool pricesOk = ArePriceValuesValid(m1High) && ArePriceValuesValid(m1Low) && ArePriceValuesValid(m1Close);
       if (pricesOk)
       {
-         pricesOk = (ArrayCopy(g_m1High, m1High) == breakoutPriceBars &&
-                     ArrayCopy(g_m1Low, m1Low) == breakoutPriceBars &&
-                     ArrayCopy(g_m1Close, m1Close) == breakoutPriceBars);
+         pricesOk = (ArrayCopy(g_m1High, m1High) == ArraySize(m1High) &&
+                     ArrayCopy(g_m1Low, m1Low) == ArraySize(m1Low) &&
+                     ArrayCopy(g_m1Close, m1Close) == ArraySize(m1Close));
          ArraySetAsSeries(g_m1High, true); ArraySetAsSeries(g_m1Low, true); ArraySetAsSeries(g_m1Close, true);
+         if (pricesOk)
+         {
+            int breakoutStartIndex = 2;
+            int breakoutEndIndex = MathMin(initialBreakoutLookback + 1, ArraySize(g_m1High) - 1);
+            if (breakoutEndIndex >= breakoutStartIndex &&
+                ArraySize(g_m1Low) > breakoutEndIndex)
+            {
+               double highestHigh = g_m1High[breakoutStartIndex];
+               double lowestLow = g_m1Low[breakoutStartIndex];
+               for (int i = breakoutStartIndex + 1; i <= breakoutEndIndex; i++)
+               {
+                  if (g_m1High[i] > highestHigh)
+                     highestHigh = g_m1High[i];
+                  if (g_m1Low[i] < lowestLow)
+                     lowestLow = g_m1Low[i];
+               }
+               g_initialBreakoutHighestHigh = highestHigh;
+               g_initialBreakoutLowestLow = lowestLow;
+               g_initialBreakoutPriceReady = true;
+            }
+         }
          // LogPriceValues("M1 High", m1High);
          // LogPriceValues("M1 Low", m1Low);
          // LogPriceValues("M1 Close", m1Close);
@@ -1077,7 +1107,9 @@ public:
          }
          initializedNow = true;
       }
-      if (g_superTrendInitialized && !initializedNow && !UpdateSuperTrend(g_atr[1], g_m1High, g_m1Low, g_m1Close))
+      if (g_superTrendInitialized && !initializedNow &&
+          ArraySize(g_m1High) >= 3 && ArraySize(g_m1Low) >= 3 && ArraySize(g_m1Close) >= 3 &&
+          !UpdateSuperTrend(g_atr[1], g_m1High, g_m1Low, g_m1Close))
       {
          g_m1AllOk = false;
          g_m1_bb_ok = g_m1_stoch_ok = g_m1_atr_ok = false;
@@ -2056,11 +2088,6 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
 
    double bbWidth = g_bbUpper[1] - g_bbLower[1];
    double atr = g_atr[1];
-   if (ArraySize(g_m1Close) < 4 ||
-       ArraySize(g_m1High) < initialBreakoutLookback + 2 ||
-       ArraySize(g_m1Low) < initialBreakoutLookback + 2)
-      return signal;
-
    if (isBuy)
    {
       if (trendUp && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendDir[1] > 0 && g_superTrendReaccelBuy)
@@ -2071,24 +2098,18 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
       }
       if (trendUp && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendDir[1] > 0)
       {
-         if (bbWidth / atr >= initialBreakoutMinBBATR)
+         if (g_initialBreakoutPriceReady && bbWidth / atr >= initialBreakoutMinBBATR)
          {
-            int breakoutLookback = initialBreakoutLookback;
-            double highestHigh = g_m1High[2];
-            for (int i = 3; i <= breakoutLookback + 1; i++)
-            {
-               if (g_m1High[i] > highestHigh)
-                  highestHigh = g_m1High[i];
-            }
             double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-            if (currentAsk > highestHigh && (currentAsk - g_bbMiddle[1]) <= atr * initialBreakoutMaxExtensionATR)
+            if (currentAsk > g_initialBreakoutHighestHigh && (currentAsk - g_bbMiddle[1]) <= atr * initialBreakoutMaxExtensionATR)
             {
                signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
                g_lastTrendEntrySignalBuy = signal;
                return signal;
             }
          }
-         if (bbWidth / atr >= continuationMinBBATR &&
+         if (ArraySize(g_m1Close) >= 4 &&
+             bbWidth / atr >= continuationMinBBATR &&
              g_m1Close[1] > g_bbMiddle[1] + atr * continuationMinDistanceATR &&
              g_m1Close[1] > g_m1Close[2] && g_m1Close[2] >= g_m1Close[3])
          {
@@ -2120,24 +2141,18 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
       }
       if (trendDown && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendDir[1] < 0)
       {
-         if (bbWidth / atr >= initialBreakoutMinBBATR)
+         if (g_initialBreakoutPriceReady && bbWidth / atr >= initialBreakoutMinBBATR)
          {
-            int breakoutLookback = initialBreakoutLookback;
-            double lowestLow = g_m1Low[2];
-            for (int i = 3; i <= breakoutLookback + 1; i++)
-            {
-               if (g_m1Low[i] < lowestLow)
-                  lowestLow = g_m1Low[i];
-            }
             double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-            if (currentBid < lowestLow && (g_bbMiddle[1] - currentBid) <= atr * initialBreakoutMaxExtensionATR)
+            if (currentBid < g_initialBreakoutLowestLow && (g_bbMiddle[1] - currentBid) <= atr * initialBreakoutMaxExtensionATR)
             {
                signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
                g_lastTrendEntrySignalSell = signal;
                return signal;
             }
          }
-         if (bbWidth / atr >= continuationMinBBATR &&
+         if (ArraySize(g_m1Close) >= 4 &&
+             bbWidth / atr >= continuationMinBBATR &&
              g_m1Close[1] < g_bbMiddle[1] - atr * continuationMinDistanceATR &&
              g_m1Close[1] < g_m1Close[2] && g_m1Close[2] <= g_m1Close[3])
          {
