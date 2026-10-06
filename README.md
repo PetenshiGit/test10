@@ -200,13 +200,44 @@ Stochastic決済は、BUYでは`K[2] > 80`からのクロスダウン、SELLで�
 
 OnTradeは空のイベントとして残します。
 
-実取引の内容、およびその時点のBUY・SELL・合計ポジション数はOnTradeTransactionでログ表示します。
+## 解析CSV
 
-MT5のイベント仕様により、同一取引について複数回ログが出力される場合があります。
+バックテストごとに `EA_Analysis.csv` を新規作成し、MT5 Strategy Testerの通常のFiles領域に保存します。1行目は共通ヘッダーで、全レコードを同じ列構成にします。既存ファイルはテスト開始時に上書きします。
 
-指標とM1価格系列は、取得成功時に実値、失敗時にハンドル・時間足・必要本数・取得本数・無効値・エラーコードをログ表示します。発注、決済、SL更新も成功・失敗を分けて記録し、決済成功時は`res.deal`、成立条件、BUY/SELL方向の損益方向価格差を表示します。取引イベントではEA取引、SL、TPをDeal reasonで区別します。
+`RecordType` は `M1_UPDATE`、`M15_UPDATE`、`H1_UPDATE`、`ENTRY_SIGNAL`、`ENTRY`、`ENTRY_SUPPRESSION`、`EXIT_SIGNAL`、`EXIT`、`SL_UPDATE`、`POSITION_SUMMARY`、`WEEKEND`、`DEAL`、`OTHER_ANALYSIS`、`ATR2_EXTENSION_TICK` を使用します。各レコードで該当しない列は空欄です。
 
-取引ログの価格、ロット、時刻、注文、ポジション、Magicは、`HistoryDealSelect()`で選択した履歴Deal情報を使用します。実約定時刻は`DEAL_TIME_MSC`を基準にし、INからOUTまでの保持時間も実約定時刻の差で計算します。`DEAL_ENTRY_INOUT`や`DEAL_ENTRY_OUT_BY`などの特殊なEntryは通常のIN/OUT保持時間計算には使用しません。
+CSVヘッダーは次の固定列です。
+
+```text
+RecordType,DateTime,TimeMsc,Symbol,Direction,Price,ExitPrice,Bid,Ask,SpreadPoints,Lot,Ticket,Order,Deal,Position,Reason,H1BarTime,H1TrendType,H1TrendState,H1DIDirection,H1EMADirection,ADX,DIPlus,DIMinus,EMAShort,EMALong,M15BarTime,M15RSI,M15MACDMain,M15MACDSignal,M15MACDHistogram,M15MACDCross,M1BarTime,M1BBUpper,M1BBMiddle,M1BBLower,M1StochK,M1StochD,M1ATR,M1SuperTrend,M1SuperTrendDirection,EntrySignal,CloseStochastic,CloseTrendBBMiddle,EntryPrice,SL,TP,ElapsedSeconds,SameDirectionCount,LotCalculation,Balance,Equity,FreeMargin,RequiredMargin,ReasonDetail,ATR2Boundary,ATR2Extension,ATR2TickIndex,ATR2ElapsedMs,ATR2EventId,ATR2InsideBoundary,EntryExecuted,MagicNumber,Retcode,Comment,PriceDifference,RequestedPrice,ExecutionPrice,DealReason
+```
+
+確定足の指標、H1判定値、発注・決済の成功内容、IN/OUT Deal情報、決済条件、発注資金確認、ポジション数、週末処理、OnTimerが設定したENTRY/EXIT価格をCSVへ記録します。指標・価格取得失敗、無効値、発注・決済・SL更新失敗などの原因確認用メッセージは、従来どおりMT5通常ログへ残します。
+
+| `RecordType` | 主な出力列 |
+| --- | --- |
+| `M1_UPDATE` | `M1BarTime`, `M1ATR`, `M1BBUpper/Middle/Lower`, `M1StochK/D`, `M1SuperTrend/Direction` |
+| `M15_UPDATE` | `M15BarTime`, `M15RSI`, `M15MACDMain/Signal/Histogram/Cross` |
+| `H1_UPDATE` | `H1BarTime`, `H1TrendType/State`, `H1DIDirection`, `H1EMADirection`, `ADX`, `DIPlus/Minus`, `EMAShort/Long` |
+| `ENTRY_SIGNAL` | `Direction`, `EntrySignal`, `SameDirectionCount`, `Lot`, `Bid/Ask`, `SpreadPoints`, `EntryPrice` |
+| `ENTRY` | `RequestedPrice`, `ExecutionPrice`, `Lot`, `SL`, `TP`, `MagicNumber`, `Order`, `Deal`, `Position`, `Retcode`, `Comment` |
+| `ENTRY_SUPPRESSION` | `Direction`, `EntryPrice`, `EntrySignal`, suppression reason |
+| `EXIT_SIGNAL` | `Direction`, `Price`, stochastic/BB-middle conditions, reason, M1 indicator snapshot |
+| `EXIT` | `Ticket`, `Position`, `EntryPrice`, `ExitPrice`, `Lot`, `SpreadPoints`, `PriceDifference`, `Reason`, `Retcode`, `Comment`, `Deal`, `Order` |
+| `SL_UPDATE` | `Ticket`, `Position`, `Direction`, `Price`, new `SL`, `Retcode`, `Comment` |
+| `POSITION_SUMMARY` | position counts and summary reason |
+| `WEEKEND` | weekend state changes and force-close target snapshots |
+| `DEAL` | IN/OUT deal fields, deal reason, indicator snapshot and elapsed seconds when available |
+| `OTHER_ANALYSIS` | margin checks, request counts, OnTimer ENTRY/EXIT prices and other state details |
+| `ATR2_EXTENSION_TICK` | per-tick quote, 2ATR boundary/extension, event ID/index/elapsed time, inside-boundary flag and entry status |
+
+`ATR2_EXTENSION_TICK` は、BUY/SELL別に2ATR境界を初めて超えたTickから、境界内へ戻ったTickまでを記録します。イベント開始Tickの `ATR2TickIndex` は0で、境界内への復帰Tickも記録されます。`ATR2EventId` でイベントを識別し、`ATR2ElapsedMs` と `TimeMsc` でTickの経過時間・順序を確認できます。この記録追加は解析専用であり、2ATR条件を含む売買判定を変更しません。
+
+MT5のイベント仕様により、同一取引について `DEAL` 解析レコードとIN/OUTレコードの複数行がCSVに出力される場合があります。
+
+指標とM1価格系列の取得失敗は、ハンドル・時間足・必要本数・取得本数・無効値・エラーコードをMT5通常ログに出力します。発注、決済、SL更新の成功情報はCSVに、失敗情報はMT5通常ログに記録します。取引イベントではEA取引、SL、TPをDeal reasonで区別します。
+
+取引解析CSVの価格、ロット、時刻、注文、ポジション、Magicは、`HistoryDealSelect()`で選択した履歴Deal情報を使用します。実約定時刻は`DEAL_TIME_MSC`を基準にし、INからOUTまでの保持時間も実約定時刻の差で計算します。`DEAL_ENTRY_INOUT`や`DEAL_ENTRY_OUT_BY`などの特殊なEntryは通常のIN/OUT保持時間計算には使用しません。
 
 ## 週末休場
 
