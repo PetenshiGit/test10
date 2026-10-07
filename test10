@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.37"
+#property version   "3.38"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -1025,6 +1025,7 @@ void RecordRequest(RequestEvaluation evaluation, uint retcode)
    g_requestRecords[index].retcode = retcode;
    int count = ArraySize(g_requestRecords);
    if (count > RequestLimitCount())
+   {
       SAnalysisRecord analysis;
       ResetAnalysisRecord(analysis, "OTHER_ANALYSIS");
       SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
@@ -1034,6 +1035,7 @@ void RecordRequest(RequestEvaluation evaluation, uint retcode)
          ";ExecutionSucceeded=" + IntegerToString(RequestEvaluationCount(REQUEST_EXECUTION_SUCCEEDED)) +
          ";Requests=" + IntegerToString(count);
       WriteAnalysisRecord(analysis);
+   }
 }
 
 void AddTradeHistoryTimestamp(datetime t)
@@ -1614,7 +1616,7 @@ public:
          {
             SAnalysisRecord m1Analysis;
             ResetAnalysisRecord(m1Analysis, "M1_UPDATE");
-            SetAnalysisContext(m1Analysis, (datetime)rates[1].time, (long)rates[1].time_msc);
+            SetAnalysisContext(m1Analysis, (datetime)rates[1].time, AnalysisCurrentTimeMsc());
             m1Analysis.values[AC_M1_BAR_TIME] = AnalysisDateTime(rates[1].time);
             m1Analysis.values[AC_M1_OPEN] = AnalysisNumber(rates[1].open, _Digits);
             m1Analysis.values[AC_M1_HIGH] = AnalysisNumber(rates[1].high, _Digits);
