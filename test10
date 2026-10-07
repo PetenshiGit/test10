@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.36"
+#property version   "3.37"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -45,6 +45,7 @@ input int RangeMinProfitPoints      = 5;     // レンジ時の最低利益確�
 input bool EnableEntryOnCloseSignal = true;  // 決済シグナルと新規エントリーシグナルが同時成立した場合にエントリーを許可
 input bool EnableTrendTrading       = true;  // H1トレンド判定時の新規エントリーの許可
 input bool EnableRangeTrading       = true;  // H1レンジ判定時の新規エントリーの許可
+input double atr2MinExtensionSeconds = 0.0; // 2ATR特殊エントリーの時間条件（秒）。今回は0秒で実質常時成立。
 
 // ===================================================================
 // 内部パラメータ（input にはしない）
@@ -162,7 +163,8 @@ enum EntrySignalType
    ENTRY_SIGNAL_NONE,                 // なし
    ENTRY_SIGNAL_REACCEL,             // 押し目→再加速
    ENTRY_SIGNAL_INITIAL_BREAKOUT,    // 初動ブレイク
-   ENTRY_SIGNAL_CONTINUATION         // トレンド継続
+   ENTRY_SIGNAL_CONTINUATION,        // トレンド継続
+   ENTRY_SIGNAL_ATR2_EXTENSION       // 2ATR超過連続Tickによる特殊エントリー
 };
 
 enum DivergenceType
@@ -364,6 +366,11 @@ enum AnalysisColumn
    AC_M15_MACD_HISTOGRAM,
    AC_M15_MACD_CROSS,
    AC_M1_BAR_TIME,
+   AC_M1_OPEN,
+   AC_M1_HIGH,
+   AC_M1_LOW,
+   AC_M1_CLOSE,
+   AC_M1_TICK_VOLUME,
    AC_M1_BB_UPPER,
    AC_M1_BB_MIDDLE,
    AC_M1_BB_LOWER,
@@ -393,6 +400,18 @@ enum AnalysisColumn
    AC_ATR2_EVENT_ID,
    AC_ATR2_INSIDE_BOUNDARY,
    AC_ENTRY_EXECUTED,
+   AC_TRADE_TICK_RECORD_TYPE,
+   AC_TRADE_TICK_EVENT_ID,
+   AC_TRADE_TICK_RELATIVE_INDEX,
+   AC_TRADE_TICK_TIME_MSC,
+   AC_TRADE_TICK_BID,
+   AC_TRADE_TICK_ASK,
+   AC_TRADE_TICK_SPREAD_POINTS,
+   AC_TRADE_TICK_M1_BAR_TIME,
+   AC_TRADE_TICK_ATR,
+   AC_TRADE_TICK_BB_MIDDLE,
+   AC_TRADE_TICK_SUPER_TREND,
+   AC_TRADE_TICK_DIRECTION,
    AC_MAGIC_NUMBER,
    AC_RETCODE,
    AC_COMMENT,
@@ -416,6 +435,25 @@ struct SAtr2Event
    long startTimeMsc;
 };
 
+struct STradeTickContext
+{
+   datetime time;
+   long timeMsc;
+   double bid;
+   double ask;
+   double spreadPoints;
+   datetime m1BarTime;
+   double atr;
+   double bbMiddle;
+   double superTrend;
+   int direction;
+   long eventId;
+   string recordType;
+   int relativeIndex;
+};
+
+STradeTickContext g_tradeTickHistory[];
+
 int g_analysisFile = INVALID_HANDLE;
 long g_nextAtr2EventId = 1;
 SAtr2Event g_atr2BuyEvent;
@@ -425,6 +463,14 @@ SAnalysisRecord g_pendingAtr2SellRecord;
 bool g_pendingAtr2BuyRecordValid = false;
 bool g_pendingAtr2SellRecordValid = false;
 long g_currentAtr2TickTimeMsc = 0;
+int tradeTickHistorySize = 50;  // 取引前後Tick記録用のリングバッファサイズ
+int g_tradeTickWritePos = 0;
+int g_tradeTickCount = 0;
+
+datetime g_lastM1CsvBarTime = 0;
+datetime g_atr2M1BarTime = 0;
+double g_currentAtr2BoundaryBuy = 0.0;
+double g_currentAtr2BoundarySell = 0.0;
 
 // ===================================================================
 // IsIndicatorValueValid: 指標値の有効性判定
@@ -583,14 +629,17 @@ bool OpenAnalysisCsv()
       "SpreadPoints", "Lot", "Ticket", "Order", "Deal", "Position", "Reason", "H1BarTime",
       "H1TrendType", "H1TrendState", "H1DIDirection", "H1EMADirection", "ADX", "DIPlus",
       "DIMinus", "EMAShort", "EMALong", "M15BarTime", "M15RSI", "M15MACDMain",
-      "M15MACDSignal", "M15MACDHistogram", "M15MACDCross", "M1BarTime", "M1BBUpper",
-      "M1BBMiddle", "M1BBLower", "M1StochK", "M1StochD", "M1ATR", "M1SuperTrend",
-      "M1SuperTrendDirection", "EntrySignal", "CloseStochastic", "CloseTrendBBMiddle",
-      "EntryPrice", "SL", "TP", "ElapsedSeconds", "SameDirectionCount", "LotCalculation",
-      "Balance", "Equity", "FreeMargin", "RequiredMargin", "ReasonDetail", "ATR2Boundary",
-      "ATR2Extension", "ATR2TickIndex", "ATR2ElapsedMs", "ATR2EventId", "ATR2InsideBoundary",
-      "EntryExecuted", "MagicNumber", "Retcode", "Comment", "PriceDifference",
-      "RequestedPrice", "ExecutionPrice", "DealReason"
+      "M15MACDSignal", "M15MACDHistogram", "M15MACDCross", "M1BarTime", "M1Open", "M1High",
+      "M1Low", "M1Close", "M1TickVolume", "M1BBUpper", "M1BBMiddle", "M1BBLower",
+      "M1StochK", "M1StochD", "M1ATR", "M1SuperTrend", "M1SuperTrendDirection", "EntrySignal",
+      "CloseStochastic", "CloseTrendBBMiddle", "EntryPrice", "SL", "TP", "ElapsedSeconds",
+      "SameDirectionCount", "LotCalculation", "Balance", "Equity", "FreeMargin", "RequiredMargin",
+      "ReasonDetail", "ATR2Boundary", "ATR2Extension", "ATR2TickIndex", "ATR2ElapsedMs",
+      "ATR2EventId", "ATR2InsideBoundary", "EntryExecuted", "TradeTickRecordType",
+      "TradeTickEventId", "TradeTickRelativeIndex", "TradeTickTimeMsc", "TradeTickBid",
+      "TradeTickAsk", "TradeTickSpreadPoints", "TradeTickM1BarTime", "TradeTickATR",
+      "TradeTickBBMiddle", "TradeTickSuperTrend", "TradeTickDirection", "MagicNumber",
+      "Retcode", "Comment", "PriceDifference", "RequestedPrice", "ExecutionPrice", "DealReason"
    };
    uint written = FileWriteString(g_analysisFile, BuildAnalysisCsvLine(headers));
    if (written == 0)
@@ -619,49 +668,126 @@ void MarkAtr2EntryExecuted(bool isBuy)
       g_pendingAtr2SellRecord.values[AC_ENTRY_EXECUTED] = "true";
 }
 
-void RecordAtr2Direction(SAtr2Event &event, SAnalysisRecord &record, bool &recordValid,
-                         bool isBuy, const MqlTick &tick, double boundary, bool beyondBoundary)
+void RecordTradeTickContext(const string recordType, long eventId, int relativeIndex, const MqlTick &tick, datetime m1BarTime)
 {
-   bool insideBoundary = false;
+   if (tradeTickHistorySize <= 0)
+      return;
+   if (ArraySize(g_tradeTickHistory) != tradeTickHistorySize)
+      ArrayResize(g_tradeTickHistory, tradeTickHistorySize);
+
+   int idx = g_tradeTickWritePos % tradeTickHistorySize;
+   g_tradeTickHistory[idx].time = (datetime)tick.time;
+   g_tradeTickHistory[idx].timeMsc = tick.time_msc;
+   g_tradeTickHistory[idx].bid = tick.bid;
+   g_tradeTickHistory[idx].ask = tick.ask;
+   g_tradeTickHistory[idx].spreadPoints = (tick.ask - tick.bid) / _Point;
+   g_tradeTickHistory[idx].m1BarTime = m1BarTime;
+   g_tradeTickHistory[idx].atr = g_m1_atr_ok && ArraySize(g_atr) > 1 ? g_atr[1] : 0.0;
+   g_tradeTickHistory[idx].bbMiddle = g_m1_bb_ok && ArraySize(g_bbMiddle) > 1 ? g_bbMiddle[1] : 0.0;
+   g_tradeTickHistory[idx].superTrend = ArraySize(g_superTrend) > 1 ? g_superTrend[1] : 0.0;
+   g_tradeTickHistory[idx].direction = (ArraySize(g_superTrendDir) > 1 && g_superTrendDir[1] > 0) ? 1 : ((ArraySize(g_superTrendDir) > 1 && g_superTrendDir[1] < 0) ? -1 : 0);
+   g_tradeTickHistory[idx].eventId = eventId;
+   g_tradeTickHistory[idx].recordType = recordType;
+   g_tradeTickHistory[idx].relativeIndex = relativeIndex;
+   g_tradeTickWritePos = (g_tradeTickWritePos + 1) % tradeTickHistorySize;
+   if (g_tradeTickCount < tradeTickHistorySize)
+      g_tradeTickCount++;
+}
+
+void FlushTradeTickHistoryToCsv(const string recordType, long eventId)
+{
+   if (g_tradeTickCount <= 0 || tradeTickHistorySize <= 0)
+      return;
+
+   int start = (g_tradeTickWritePos + tradeTickHistorySize - g_tradeTickCount) % tradeTickHistorySize;
+   for (int i = 0; i < g_tradeTickCount; i++)
+   {
+      int idx = (start + i) % tradeTickHistorySize;
+      SAnalysisRecord tradeAnalysis;
+      ResetAnalysisRecord(tradeAnalysis, "TRADE_TICK_CONTEXT");
+      SetAnalysisContext(tradeAnalysis, g_tradeTickHistory[idx].time, g_tradeTickHistory[idx].timeMsc);
+      tradeAnalysis.values[AC_TRADE_TICK_RECORD_TYPE] = g_tradeTickHistory[idx].recordType;
+      tradeAnalysis.values[AC_TRADE_TICK_EVENT_ID] = AnalysisLong(g_tradeTickHistory[idx].eventId);
+      tradeAnalysis.values[AC_TRADE_TICK_RELATIVE_INDEX] = IntegerToString(g_tradeTickHistory[idx].relativeIndex);
+      tradeAnalysis.values[AC_TRADE_TICK_TIME_MSC] = AnalysisLong(g_tradeTickHistory[idx].timeMsc);
+      tradeAnalysis.values[AC_TRADE_TICK_BID] = AnalysisNumber(g_tradeTickHistory[idx].bid, _Digits);
+      tradeAnalysis.values[AC_TRADE_TICK_ASK] = AnalysisNumber(g_tradeTickHistory[idx].ask, _Digits);
+      tradeAnalysis.values[AC_TRADE_TICK_SPREAD_POINTS] = AnalysisNumber(g_tradeTickHistory[idx].spreadPoints, 1);
+      tradeAnalysis.values[AC_TRADE_TICK_M1_BAR_TIME] = AnalysisDateTime(g_tradeTickHistory[idx].m1BarTime);
+      tradeAnalysis.values[AC_TRADE_TICK_ATR] = AnalysisNumber(g_tradeTickHistory[idx].atr, _Digits);
+      tradeAnalysis.values[AC_TRADE_TICK_BB_MIDDLE] = AnalysisNumber(g_tradeTickHistory[idx].bbMiddle, _Digits);
+      tradeAnalysis.values[AC_TRADE_TICK_SUPER_TREND] = AnalysisNumber(g_tradeTickHistory[idx].superTrend, _Digits);
+      tradeAnalysis.values[AC_TRADE_TICK_DIRECTION] = (g_tradeTickHistory[idx].direction > 0) ? "BUY" : ((g_tradeTickHistory[idx].direction < 0) ? "SELL" : "NONE");
+      tradeAnalysis.values[AC_REASON] = recordType;
+      tradeAnalysis.values[AC_MAGIC_NUMBER] = AnalysisLong(eventId);
+      WriteAnalysisRecord(tradeAnalysis);
+   }
+}
+
+void ResetAtr2StateForM1()
+{
+   g_atr2BuyEvent.active = false;
+   g_atr2BuyEvent.eventId = 0;
+   g_atr2BuyEvent.tickIndex = 0;
+   g_atr2BuyEvent.startTimeMsc = 0;
+   g_atr2SellEvent.active = false;
+   g_atr2SellEvent.eventId = 0;
+   g_atr2SellEvent.tickIndex = 0;
+   g_atr2SellEvent.startTimeMsc = 0;
+   g_pendingAtr2BuyRecordValid = false;
+   g_pendingAtr2SellRecordValid = false;
+}
+
+void RecordAtr2Direction(SAtr2Event &event, bool isBuy, const MqlTick &tick, double boundary, bool beyondBoundary)
+{
+   if (!MathIsValidNumber(boundary) || boundary == 0.0)
+      return;
+
    if (!event.active && beyondBoundary)
    {
       event.active = true;
       event.eventId = g_nextAtr2EventId++;
-      event.tickIndex = 0;
+      event.tickIndex = 1;
       event.startTimeMsc = tick.time_msc;
    }
-   else if (event.active)
+   else if (event.active && beyondBoundary)
    {
       event.tickIndex++;
-      insideBoundary = !beyondBoundary;
+   }
+   else if (event.active && !beyondBoundary)
+   {
+      event.tickIndex++;
+      event.active = false;
    }
    else
+   {
       return;
+   }
 
-   ResetAnalysisRecord(record, "ATR2_EXTENSION_TICK");
-   SetAnalysisContext(record, (datetime)tick.time, tick.time_msc);
-   record.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
-   record.values[AC_BID] = AnalysisNumber(tick.bid, _Digits);
-   record.values[AC_ASK] = AnalysisNumber(tick.ask, _Digits);
-   record.values[AC_SPREAD_POINTS] = AnalysisNumber((tick.ask - tick.bid) / _Point, 1);
-   record.values[AC_ATR2_BOUNDARY] = AnalysisNumber(boundary, _Digits);
-   record.values[AC_ATR2_EXTENSION] = AnalysisNumber(isBuy ? tick.ask - boundary : boundary - tick.bid, _Digits);
-   record.values[AC_ATR2_TICK_INDEX] = IntegerToString(event.tickIndex);
-   record.values[AC_ATR2_ELAPSED_MS] = AnalysisLong(tick.time_msc - event.startTimeMsc);
-   record.values[AC_ATR2_EVENT_ID] = AnalysisLong(event.eventId);
-   record.values[AC_ATR2_INSIDE_BOUNDARY] = insideBoundary ? "true" : "false";
-   record.values[AC_ENTRY_SIGNAL] = EnumToString(isBuy ? g_lastTrendEntrySignalBuy : g_lastTrendEntrySignalSell);
-   record.values[AC_ENTRY_EXECUTED] = "false";
-   recordValid = true;
-   if (insideBoundary)
+   SAnalysisRecord atr2Analysis;
+   ResetAnalysisRecord(atr2Analysis, "ATR2_EXTENSION_TICK");
+   SetAnalysisContext(atr2Analysis, (datetime)tick.time, tick.time_msc);
+   atr2Analysis.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
+   atr2Analysis.values[AC_BID] = AnalysisNumber(tick.bid, _Digits);
+   atr2Analysis.values[AC_ASK] = AnalysisNumber(tick.ask, _Digits);
+   atr2Analysis.values[AC_SPREAD_POINTS] = AnalysisNumber((tick.ask - tick.bid) / _Point, 1);
+   atr2Analysis.values[AC_ATR2_BOUNDARY] = AnalysisNumber(boundary, _Digits);
+   atr2Analysis.values[AC_ATR2_EXTENSION] = AnalysisNumber(isBuy ? tick.ask - boundary : boundary - tick.bid, _Digits);
+   atr2Analysis.values[AC_ATR2_TICK_INDEX] = IntegerToString(event.tickIndex);
+   atr2Analysis.values[AC_ATR2_ELAPSED_MS] = AnalysisLong(tick.time_msc - event.startTimeMsc);
+   atr2Analysis.values[AC_ATR2_EVENT_ID] = AnalysisLong(event.eventId);
+   atr2Analysis.values[AC_ATR2_INSIDE_BOUNDARY] = (!beyondBoundary) ? "true" : "false";
+   atr2Analysis.values[AC_ENTRY_SIGNAL] = EnumToString(isBuy ? g_lastTrendEntrySignalBuy : g_lastTrendEntrySignalSell);
+   atr2Analysis.values[AC_ENTRY_EXECUTED] = "false";
+   WriteAnalysisRecord(atr2Analysis);
+
+   if (!beyondBoundary)
       event.active = false;
 }
 
 void MonitorAtr2ExtensionTicks()
 {
    FlushPendingAtr2Records();
-   if (g_pendingAtr2BuyRecordValid || g_pendingAtr2SellRecordValid)
-      return;
 
    MqlTick tick;
    ZeroMemory(tick);
@@ -674,16 +800,19 @@ void MonitorAtr2ExtensionTicks()
        !IsIndicatorValueValid(g_atr[1]) || g_atr[1] <= 0.0)
       return;
 
+   datetime currentM1Bar = iTime(_Symbol, PERIOD_M1, 1);
+   if (g_atr2M1BarTime != 0 && currentM1Bar != g_atr2M1BarTime)
+      ResetAtr2StateForM1();
+   g_atr2M1BarTime = currentM1Bar;
+
    g_currentAtr2TickTimeMsc = tick.time_msc;
-   double buyBoundary = g_bbMiddle[1] + g_atr[1] * initialBreakoutMaxExtensionATR;
-   double sellBoundary = g_bbMiddle[1] - g_atr[1] * initialBreakoutMaxExtensionATR;
-   if (!MathIsValidNumber(buyBoundary) || !MathIsValidNumber(sellBoundary))
+   g_currentAtr2BoundaryBuy = g_bbMiddle[1] + g_atr[1] * initialBreakoutMaxExtensionATR;
+   g_currentAtr2BoundarySell = g_bbMiddle[1] - g_atr[1] * initialBreakoutMaxExtensionATR;
+   if (!MathIsValidNumber(g_currentAtr2BoundaryBuy) || !MathIsValidNumber(g_currentAtr2BoundarySell))
       return;
 
-   RecordAtr2Direction(g_atr2BuyEvent, g_pendingAtr2BuyRecord, g_pendingAtr2BuyRecordValid,
-                       true, tick, buyBoundary, tick.ask > buyBoundary);
-   RecordAtr2Direction(g_atr2SellEvent, g_pendingAtr2SellRecord, g_pendingAtr2SellRecordValid,
-                       false, tick, sellBoundary, tick.bid < sellBoundary);
+   RecordAtr2Direction(g_atr2BuyEvent, true, tick, g_currentAtr2BoundaryBuy, tick.ask > g_currentAtr2BoundaryBuy);
+   RecordAtr2Direction(g_atr2SellEvent, false, tick, g_currentAtr2BoundarySell, tick.bid < g_currentAtr2BoundarySell);
 }
 
 bool IsIndicatorValueValid(double v)
@@ -1475,6 +1604,36 @@ public:
          LogInvalidArrayValues("M1 Low", m1Low);
          LogInvalidArrayValues("M1 Close", m1Close);
       }
+      MqlRates rates[];
+      ArrayResize(rates, 2);
+      ArraySetAsSeries(rates, true);
+      if (CopyRates(_Symbol, PERIOD_M1, 0, 2, rates) == 2)
+      {
+         datetime currentM1BarTime = rates[1].time;
+         if (g_lastM1CsvBarTime == 0 || currentM1BarTime != g_lastM1CsvBarTime)
+         {
+            SAnalysisRecord m1Analysis;
+            ResetAnalysisRecord(m1Analysis, "M1_UPDATE");
+            SetAnalysisContext(m1Analysis, (datetime)rates[1].time, (long)rates[1].time_msc);
+            m1Analysis.values[AC_M1_BAR_TIME] = AnalysisDateTime(rates[1].time);
+            m1Analysis.values[AC_M1_OPEN] = AnalysisNumber(rates[1].open, _Digits);
+            m1Analysis.values[AC_M1_HIGH] = AnalysisNumber(rates[1].high, _Digits);
+            m1Analysis.values[AC_M1_LOW] = AnalysisNumber(rates[1].low, _Digits);
+            m1Analysis.values[AC_M1_CLOSE] = AnalysisNumber(rates[1].close, _Digits);
+            m1Analysis.values[AC_M1_TICK_VOLUME] = IntegerToString((int)rates[1].tick_volume);
+            m1Analysis.values[AC_M1_BB_UPPER] = AnalysisArrayValue(g_bbUpper, 1, _Digits);
+            m1Analysis.values[AC_M1_BB_MIDDLE] = AnalysisArrayValue(g_bbMiddle, 1, _Digits);
+            m1Analysis.values[AC_M1_BB_LOWER] = AnalysisArrayValue(g_bbLower, 1, _Digits);
+            m1Analysis.values[AC_M1_STOCH_K] = AnalysisArrayValue(g_stochK, 1, 3);
+            m1Analysis.values[AC_M1_STOCH_D] = AnalysisArrayValue(g_stochD, 1, 3);
+            m1Analysis.values[AC_M1_ATR] = AnalysisArrayValue(g_atr, 1, _Digits);
+            m1Analysis.values[AC_M1_SUPER_TREND] = AnalysisArrayValue(g_superTrend, 1, _Digits);
+            if (ArraySize(g_superTrendDir) > 1)
+               m1Analysis.values[AC_M1_SUPER_TREND_DIRECTION] = LogSuperTrendDirection(1);
+            WriteAnalysisRecord(m1Analysis);
+            g_lastM1CsvBarTime = currentM1BarTime;
+         }
+      }
       g_m1AllOk = g_m1_bb_ok && g_m1_stoch_ok && g_m1_atr_ok && pricesOk;
       if (!g_m1AllOk)
       {
@@ -1929,6 +2088,9 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp)
    if (positionId > 0)
       analysis.values[AC_POSITION] = AnalysisLong(positionId);
    WriteAnalysisRecord(analysis);
+   FlushTradeTickHistoryToCsv("ORDER", (long)res.order);
+   g_tradeTickWritePos = 0;
+   g_tradeTickCount = 0;
    MarkAtr2EntryExecuted(isBuy);
    return (true);
 }
@@ -2011,6 +2173,9 @@ bool ClosePositionByTicket(ulong ticket, const string reason)
    analysis.values[AC_DEAL] = AnalysisLong((long)res.deal);
    analysis.values[AC_ORDER] = AnalysisLong((long)res.order);
    WriteAnalysisRecord(analysis);
+   FlushTradeTickHistoryToCsv("CLOSE", (long)ticket);
+   g_tradeTickWritePos = 0;
+   g_tradeTickCount = 0;
    return (true);
 }
 
@@ -2402,6 +2567,10 @@ int OnInit()
    g_atr2SellEvent.startTimeMsc = 0;
    g_pendingAtr2BuyRecordValid = false;
    g_pendingAtr2SellRecordValid = false;
+   g_tradeTickWritePos = 0;
+   g_tradeTickCount = 0;
+   ArrayResize(g_tradeTickHistory, tradeTickHistorySize);
+   g_atr2M1BarTime = 0;
 
    StartTimeGlobal = TimeCurrent();
    SAnalysisRecord startAnalysis;
@@ -2535,6 +2704,7 @@ void OnDeinit(const int reason)
       positionAnalysis.values[AC_REASON] = "Positions at deinitialization";
       positionAnalysis.values[AC_SAME_DIRECTION_COUNT] = IntegerToString(PositionsTotal());
       WriteAnalysisRecord(positionAnalysis);
+      FlushTradeTickHistoryToCsv("DEINIT", 0);
       FileFlush(g_analysisFile);
       FileClose(g_analysisFile);
       g_analysisFile = INVALID_HANDLE;
@@ -2595,8 +2765,17 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
 
    double bbWidth = g_bbUpper[1] - g_bbLower[1];
    double atr = g_atr[1];
+   long atr2ElapsedMs = (g_atr2BuyEvent.startTimeMsc > 0) ? (AnalysisCurrentTimeMsc() - g_atr2BuyEvent.startTimeMsc) : 0;
    if (isBuy)
    {
+      if (trendUp && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendDir[1] > 0 && g_atr2BuyEvent.active && g_atr2BuyEvent.tickIndex >= 3 &&
+          SymbolInfoDouble(_Symbol, SYMBOL_ASK) > g_currentAtr2BoundaryBuy &&
+          atr2ElapsedMs >= (long)(atr2MinExtensionSeconds * 1000.0))
+      {
+         signal = ENTRY_SIGNAL_ATR2_EXTENSION;
+         g_lastTrendEntrySignalBuy = signal;
+         return signal;
+      }
       if (trendUp && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendDir[1] > 0 && g_superTrendReaccelBuy)
       {
          signal = ENTRY_SIGNAL_REACCEL;
@@ -2640,6 +2819,14 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
    }
    else
    {
+      if (trendDown && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendDir[1] < 0 && g_atr2SellEvent.active && g_atr2SellEvent.tickIndex >= 3 &&
+          SymbolInfoDouble(_Symbol, SYMBOL_BID) < g_currentAtr2BoundarySell &&
+          atr2ElapsedMs >= (long)(atr2MinExtensionSeconds * 1000.0))
+      {
+         signal = ENTRY_SIGNAL_ATR2_EXTENSION;
+         g_lastTrendEntrySignalSell = signal;
+         return signal;
+      }
       if (trendDown && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendDir[1] < 0 && g_superTrendReaccelSell)
       {
          signal = ENTRY_SIGNAL_REACCEL;
@@ -2954,6 +3141,11 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   MqlTick tick;
+   ZeroMemory(tick);
+   if (SymbolInfoTick(_Symbol, tick))
+      RecordTradeTickContext("TICK", 0, 0, tick, iTime(_Symbol, PERIOD_M1, 1));
+
    MonitorAtr2ExtensionTicks();
 
    double ASK = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
