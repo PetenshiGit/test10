@@ -3159,7 +3159,7 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       suppressionDetails += "H1 classification is not tradable;";
    }
    if (isTrend && ((isBuy && (g_H1DiDir != 1 || ArraySize(g_superTrendDir) <= 1 || g_superTrendDir[1] <= 0)) ||
-                   (!isBuy && (g_H1DiDir != -1 || ArraySize(g_superTrendDir) <= 1 || g_superTrendDir[1] >= 0)))
+                   (!isBuy && (g_H1DiDir != -1 || ArraySize(g_superTrendDir) <= 1 || g_superTrendDir[1] >= 0))))
    {
       suppressionReasons |= ENTRY_SUPPRESS_H1_DIRECTION;
       suppressionDetails += "H1 DI or M1 SuperTrend direction mismatch;";
