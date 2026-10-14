@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.39"
+#property version   "3.40"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -453,6 +453,10 @@ enum AnalysisColumn
    AC_REQUESTED_PRICE,
    AC_EXECUTION_PRICE,
    AC_DEAL_REASON,
+   AC_DEAL_PROFIT,
+   AC_DEAL_COMMISSION,
+   AC_DEAL_SWAP,
+   AC_DEAL_FEE,
    AC_COUNT
 };
 
@@ -676,7 +680,8 @@ bool OpenAnalysisCsv()
       "TradeTickEventId", "TradeTickRelativeIndex", "TradeTickTimeMsc", "TradeTickBid",
       "TradeTickAsk", "TradeTickSpreadPoints", "TradeTickM1BarTime", "TradeTickATR",
       "TradeTickBBMiddle", "TradeTickSuperTrend", "TradeTickDirection", "MagicNumber",
-      "Retcode", "Comment", "PriceDifference", "RequestedPrice", "ExecutionPrice", "DealReason"
+      "Retcode", "Comment", "PriceDifference", "RequestedPrice", "ExecutionPrice", "DealReason",
+      "DealProfit", "DealCommission", "DealSwap", "DealFee"
    };
    uint written = FileWriteString(g_analysisFile, BuildAnalysisCsvLine(headers));
    if (written == 0)
@@ -1879,6 +1884,10 @@ public:
       g_closeBuyOnOrAbove = false;
       g_closeSellOnOrBelow = false;
 
+      if (!g_m1AllOk || ArraySize(g_stochK) <= 2 || ArraySize(g_stochD) <= 2 ||
+          ArraySize(g_bbUpper) <= 1 || ArraySize(g_bbLower) <= 1 || ArraySize(g_bbMiddle) <= 1)
+         return;
+
       bool stochCrossDown = g_stochK[2] >= stochOverbought && g_stochK[1] < stochOverbought &&
                             g_stochK[2] >= g_stochD[2] && g_stochK[1] < g_stochD[1];
       bool stochCrossUp = g_stochK[2] <= stochOversold && g_stochK[1] > stochOversold &&
@@ -1906,6 +1915,15 @@ public:
          g_trendBBMiddleCloseBuy = close2 >= g_bbMiddle[2] && close1 < g_bbMiddle[1];
          g_trendBBMiddleCloseSell = close2 <= g_bbMiddle[2] && close1 > g_bbMiddle[1];
       }
+      else if (h1Type == TREND_UNKNOWN || h1Type == TREND_DIRECTION_UNKNOWN)
+      {
+         // 相場方向が不明でもストキャスティクス決済を監視できるよう、価格ゲートには有効なBB中央線を使用する。
+         if (IsIndicatorValueValid(g_bbMiddle[1]))
+         {
+            g_closePriceBuy = g_bbMiddle[1];
+            g_closePriceSell = g_bbMiddle[1];
+         }
+      }
    }
 
    void ComputeEntryExit(TrendType h1Type)
@@ -1922,6 +1940,25 @@ public:
       g_reaccelThresholdSell = 0.0;
 
       ComputeCloseDecision(h1Type);
+
+      // H1の取得失敗時は、古い相場分類によるBB決済を使わず、M1の共通決済条件だけを残す。
+      if (!g_h1AllOk)
+      {
+         g_closeBuyOnOrAbove = false;
+         g_closeSellOnOrBelow = false;
+         g_trendBBMiddleCloseBuy = false;
+         g_trendBBMiddleCloseSell = false;
+         if (g_m1AllOk && ArraySize(g_bbMiddle) > 1 && IsIndicatorValueValid(g_bbMiddle[1]))
+         {
+            g_closePriceBuy = g_bbMiddle[1];
+            g_closePriceSell = g_bbMiddle[1];
+         }
+         else
+         {
+            g_closePriceBuy = 0.0;
+            g_closePriceSell = 0.0;
+         }
+      }
 
       if (IsDirectionalTrendType(h1Type) && g_m1AllOk)
       {
@@ -1984,9 +2021,16 @@ public:
       if (g_closePriceSell > 0.0)
          g_canCloseSell = true;
 
+      // エントリー用データの失敗は新規発注だけを止める。決済はM1の必要データがある限り継続する。
       if (!g_h1AllOk || !g_m15AllOk || !g_m1AllOk)
       {
-         g_canEntryBuy = false; g_canEntrySell = false; g_canCloseBuy = false; g_canCloseSell = false;
+         g_canEntryBuy = false;
+         g_canEntrySell = false;
+      }
+      if (!g_m1AllOk)
+      {
+         g_canCloseBuy = false;
+         g_canCloseSell = false;
       }
 
       if (h1Type == TREND_RANGE && g_entryPriceBuy > 0.0 && g_closePriceBuy > 0.0 && g_entryPriceBuy > g_closePriceBuy)
@@ -3622,12 +3666,17 @@ int ProcessPendingTradeEvents()
       analysis.values[AC_PRICE] = AnalysisNumber(price, _Digits);
       analysis.values[AC_LOT] = AnalysisNumber(volume, 2);
       analysis.values[AC_DEAL_REASON] = EnumToString((ENUM_DEAL_REASON)dealReason);
+      analysis.values[AC_DEAL_PROFIT] = AnalysisNumber(HistoryDealGetDouble(deal, DEAL_PROFIT), 2);
+      analysis.values[AC_DEAL_COMMISSION] = AnalysisNumber(HistoryDealGetDouble(deal, DEAL_COMMISSION), 2);
+      analysis.values[AC_DEAL_SWAP] = AnalysisNumber(HistoryDealGetDouble(deal, DEAL_SWAP), 2);
+      analysis.values[AC_DEAL_FEE] = AnalysisNumber(HistoryDealGetDouble(deal, DEAL_FEE), 2);
       analysis.values[AC_REASON_DETAIL] = DealReasonToString(dealReason);
       analysis.values[AC_MAGIC_NUMBER] = AnalysisLong(magic);
 
       long positionType = dealType == DEAL_TYPE_BUY ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
       bool isEntry = dealEntry == DEAL_ENTRY_IN;
-      bool isExit = dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_OUT_BY;
+      bool isReversal = dealEntry == DEAL_ENTRY_INOUT;
+      bool isExit = dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_OUT_BY || isReversal;
       if (isExit)
          positionType = dealType == DEAL_TYPE_SELL ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
 
@@ -3654,6 +3703,8 @@ int ProcessPendingTradeEvents()
                : averageEntryPrice - price;
             analysis.values[AC_PRICE_DIFFERENCE] = AnalysisNumber(difference, _Digits);
             analysis.values[AC_REASON_DETAIL] += ";per-Deal price difference;not aggregated across partial exits";
+            if (isReversal)
+               analysis.values[AC_REASON_DETAIL] += ";reversal Deal: old position side analyzed; opening portion is not separated from raw Deal volume";
          }
          else
          {
@@ -3661,7 +3712,7 @@ int ProcessPendingTradeEvents()
          }
          datetime inTime = 0;
          long inTimeMsc = 0;
-         if (dealEntry == DEAL_ENTRY_OUT && FindEntryLogRecord(positionId, inTime, inTimeMsc) &&
+         if ((dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_INOUT) && FindEntryLogRecord(positionId, inTime, inTimeMsc) &&
              dealTimeMsc >= inTimeMsc)
             analysis.values[AC_ELAPSED_SECONDS] = AnalysisNumber((dealTimeMsc - inTimeMsc) / 1000.0, 1);
       }
