@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.40"
+#property version   "3.41"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -33,7 +33,6 @@ CTrade trade;
 // ユーザー入力
 // ===================================================================
 input long MagicNumber              = 3625;  // トレードの識別番号
-input bool EnableAnalysisCsv        = true;  // 解析用CSVの出力を有効/無効化。通常の売買判定には影響しない。
 input double BaseLot                = 1.0;   // 基本ロットサイズ（固定ロット方式）
 input double MaxLot                 = 2.0;   // 最大ロットサイズ（未実装：現時点では固定ロット方式を使用しており、資金連動ロット計算は使用していません）
 input double RiskPercentEquity      = 1.0;   // リスク率（%）（未実装：現時点では資金量連動ロット計算に使用していません）
@@ -60,6 +59,7 @@ input double atr2MinExtensionSeconds = 0.0; // 2ATR特殊エントリーの時�
 // ===================================================================
 // 内部パラメータ（input にはしない）
 // ===================================================================
+bool EnableAnalysisCsv = true;      // 解析用CSVの出力。無効化する場合はコード上でfalseにする。
 int maxPositionsNormal = 1;         // 通常時の同一方向最大ポジション数
 int maxPositionsPyramid = 3;        // 追撃を含めた同一方向の最終最大ポジション数
 int NewEntryStopBeforeClose = 3 * 60 * 60; // 週末取引終了前の新規発注停止時間（秒）
@@ -146,9 +146,9 @@ enum TrendType
    TREND_WEAK_UP,       // 弱い上昇トレンド（ADXとDI方向で分類）
    TREND_STRONG_DOWN,   // 強い下降トレンド（ADXとDI方向で分類）
    TREND_WEAK_DOWN,     // 弱い下降トレンド（ADXとDI方向で分類）
+   TREND_DIRECTION_UNKNOWN, // ADXはトレンド域だが方向不明
    TREND_RANGE,         // レンジ相場
-   TREND_UNKNOWN,       // 相場不明
-   TREND_DIRECTION_UNKNOWN // ADXはトレンド域だが方向不明
+   TREND_UNKNOWN        // 相場不明
 };
 
 //--- トレンドの状態（成長/減速等）
@@ -344,7 +344,7 @@ enum RequestEvaluation
 };
 struct STradeRequestRecord
 {
-   datetime requestTime;
+   ulong requestTimeMsc;
    RequestEvaluation evaluation;
    uint retcode;
 };
@@ -651,6 +651,8 @@ bool WriteAnalysisRecord(SAnalysisRecord &record)
 
 void WriteOtherAnalysis(const string reason, const string detail, datetime dateTime, long timeMsc)
 {
+   if (!EnableAnalysisCsv)
+      return;
    SAnalysisRecord analysis;
    ResetAnalysisRecord(analysis, "OTHER_ANALYSIS");
    SetAnalysisContext(analysis, dateTime, timeMsc);
@@ -712,14 +714,18 @@ bool OpenAnalysisCsv()
 
 void FlushPendingAtr2Records()
 {
+   if (!EnableAnalysisCsv)
+      return;
    if (g_pendingAtr2BuyRecordValid && WriteAnalysisRecord(g_pendingAtr2BuyRecord))
       g_pendingAtr2BuyRecordValid = false;
    if (g_pendingAtr2SellRecordValid && WriteAnalysisRecord(g_pendingAtr2SellRecord))
       g_pendingAtr2SellRecordValid = false;
 }
 
-void MarkAtr2EntryExecuted(bool isBuy)
+void MarkAtr2EntryExecuted(bool isBuy, EntrySignalType signal)
 {
+   if (!EnableAnalysisCsv || signal != ENTRY_SIGNAL_ATR2_EXTENSION)
+      return;
    if (isBuy && g_pendingAtr2BuyRecordValid && g_pendingAtr2BuyRecord.values[AC_TIME_MSC] == AnalysisLong(g_currentAtr2TickTimeMsc))
    {
       g_pendingAtr2BuyRecord.values[AC_ENTRY_EXECUTED] = "true";
@@ -734,6 +740,8 @@ void MarkAtr2EntryExecuted(bool isBuy)
 
 void RecordTradeTickContext(const string recordType, long eventId, int relativeIndex, const MqlTick &tick, datetime m1BarTime)
 {
+   if (!EnableAnalysisCsv)
+      return;
    if (tradeTickHistorySize <= 0)
       return;
    if (ArraySize(g_tradeTickHistory) != tradeTickHistorySize)
@@ -760,6 +768,8 @@ void RecordTradeTickContext(const string recordType, long eventId, int relativeI
 
 void FlushTradeTickHistoryToCsv(const string recordType, long eventId)
 {
+   if (!EnableAnalysisCsv)
+      return;
    if (g_tradeTickCount <= 0 || tradeTickHistorySize <= 0)
       return;
 
@@ -791,15 +801,20 @@ void FlushTradeTickHistoryToCsv(const string recordType, long eventId)
 void ResetAtr2StateForM1()
 {
    g_atr2BuyEvent.active = false;
-   g_atr2BuyEvent.eventId = 0;
+   if (EnableAnalysisCsv)
+      g_atr2BuyEvent.eventId = 0;
    g_atr2BuyEvent.tickIndex = 0;
    g_atr2BuyEvent.startTimeMsc = 0;
    g_atr2SellEvent.active = false;
-   g_atr2SellEvent.eventId = 0;
+   if (EnableAnalysisCsv)
+      g_atr2SellEvent.eventId = 0;
    g_atr2SellEvent.tickIndex = 0;
    g_atr2SellEvent.startTimeMsc = 0;
-   g_pendingAtr2BuyRecordValid = false;
-   g_pendingAtr2SellRecordValid = false;
+   if (EnableAnalysisCsv)
+   {
+      g_pendingAtr2BuyRecordValid = false;
+      g_pendingAtr2SellRecordValid = false;
+   }
 }
 
 void RecordAtr2Direction(SAtr2Event &event, bool isBuy, const MqlTick &tick, double boundary, bool beyondBoundary)
@@ -810,7 +825,8 @@ void RecordAtr2Direction(SAtr2Event &event, bool isBuy, const MqlTick &tick, dou
    if (!event.active && beyondBoundary)
    {
       event.active = true;
-      event.eventId = g_nextAtr2EventId++;
+      if (EnableAnalysisCsv)
+         event.eventId = g_nextAtr2EventId++;
       event.tickIndex = 1;
       event.startTimeMsc = tick.time_msc;
    }
@@ -827,6 +843,9 @@ void RecordAtr2Direction(SAtr2Event &event, bool isBuy, const MqlTick &tick, dou
    {
       return;
    }
+
+   if (!EnableAnalysisCsv)
+      return;
 
    SAnalysisRecord atr2Analysis;
    ResetAnalysisRecord(atr2Analysis, "ATR2_EXTENSION_TICK");
@@ -861,7 +880,8 @@ void RecordAtr2Direction(SAtr2Event &event, bool isBuy, const MqlTick &tick, dou
 
 void MonitorAtr2ExtensionTicks()
 {
-   FlushPendingAtr2Records();
+   if (EnableAnalysisCsv)
+      FlushPendingAtr2Records();
 
    MqlTick tick;
    ZeroMemory(tick);
@@ -879,7 +899,8 @@ void MonitorAtr2ExtensionTicks()
       ResetAtr2StateForM1();
    g_atr2M1BarTime = currentM1Bar;
 
-   g_currentAtr2TickTimeMsc = tick.time_msc;
+   if (EnableAnalysisCsv)
+      g_currentAtr2TickTimeMsc = tick.time_msc;
    g_currentAtr2BoundaryBuy = g_bbMiddle[1] + g_atr[1] * initialBreakoutMaxExtensionATR;
    g_currentAtr2BoundarySell = g_bbMiddle[1] - g_atr[1] * initialBreakoutMaxExtensionATR;
    if (!MathIsValidNumber(g_currentAtr2BoundaryBuy) || !MathIsValidNumber(g_currentAtr2BoundarySell))
@@ -957,9 +978,10 @@ bool CopyBufferWithRetry(int handle, int buffer, double &values[], const string 
    }
    PrintFormat("指標取得失敗 name=%s handle=%d timeframe=%s required=%d copied=%d lastError=%d", name, handle, EnumToString(timeframe), INDICATOR_BARS, copied, GetLastError());
    PrintFormat("指標取得リトライ失敗 name=%s 最終試行=%d回目", name, 3);
-   WriteOtherAnalysis("Indicator data unavailable",
-      StringFormat("name=%s;timeframe=%s;required=%d;copied=%d", name, EnumToString(timeframe), INDICATOR_BARS, copied),
-      TimeCurrent(), AnalysisCurrentTimeMsc());
+   if (EnableAnalysisCsv)
+      WriteOtherAnalysis("Indicator data unavailable",
+         StringFormat("name=%s;timeframe=%s;required=%d;copied=%d", name, EnumToString(timeframe), INDICATOR_BARS, copied),
+         TimeCurrent(), AnalysisCurrentTimeMsc());
    LogArrayValues(name, values);
    LogInvalidArrayValues(name, values);
    return(false);
@@ -976,13 +998,16 @@ void LogPriceValues(const string name, const double &values[])
 {
    for (int i = 0; i < ArraySize(values); i++)
    {
-      SAnalysisRecord analysis;
-      ResetAnalysisRecord(analysis, "OTHER_ANALYSIS");
-      SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-      analysis.values[AC_REASON] = "Price series value";
-      analysis.values[AC_REASON_DETAIL] = name + "[" + IntegerToString(i) + "]";
-      analysis.values[AC_PRICE] = AnalysisNumber(values[i], 10);
-      WriteAnalysisRecord(analysis);
+      if (EnableAnalysisCsv)
+      {
+         SAnalysisRecord analysis;
+         ResetAnalysisRecord(analysis, "OTHER_ANALYSIS");
+         SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
+         analysis.values[AC_REASON] = "Price series value";
+         analysis.values[AC_REASON_DETAIL] = name + "[" + IntegerToString(i) + "]";
+         analysis.values[AC_PRICE] = AnalysisNumber(values[i], 10);
+         WriteAnalysisRecord(analysis);
+      }
       PrintFormat("価格取得成功 %s[%d]=%.10f", name, i, values[i]);
    }
 }
@@ -1061,12 +1086,11 @@ int RequestLimitCount()
    return requestLogThreshold;
 }
 
-void PruneRequestRecords()
+void PruneRequestRecords(ulong nowMsc)
 {
-   datetime now = TimeCurrent();
    int firstValid = 0;
    int total = ArraySize(g_requestRecords);
-   while (firstValid < total && now - g_requestRecords[firstValid].requestTime > 60)
+   while (firstValid < total && nowMsc - g_requestRecords[firstValid].requestTimeMsc >= 60000)
       firstValid++;
    if (firstValid > 0)
    {
@@ -1085,26 +1109,32 @@ int RequestEvaluationCount(RequestEvaluation evaluation)
    return count;
 }
 
-void RecordRequest(RequestEvaluation evaluation, uint retcode)
+void RecordRequest(const string requestType, RequestEvaluation evaluation, uint retcode, ulong requestTimeMsc)
 {
-   PruneRequestRecords();
+   ulong nowMsc = GetTickCount64();
+   PruneRequestRecords(nowMsc);
+   if (nowMsc - requestTimeMsc >= 60000)
+      return;
    int index = ArraySize(g_requestRecords);
-   ArrayResize(g_requestRecords, index + 1);
-   g_requestRecords[index].requestTime = TimeCurrent();
+   if (ArrayResize(g_requestRecords, index + 1) != index + 1)
+   {
+      PrintFormat("取引リクエスト監視履歴の更新に失敗しました。種別=%s retcode=%u error=%d",
+                  requestType, retcode, GetLastError());
+      return;
+   }
+   g_requestRecords[index].requestTimeMsc = nowMsc;
    g_requestRecords[index].evaluation = evaluation;
    g_requestRecords[index].retcode = retcode;
    int count = ArraySize(g_requestRecords);
    if (count > RequestLimitCount())
    {
-      SAnalysisRecord analysis;
-      ResetAnalysisRecord(analysis, "OTHER_ANALYSIS");
-      SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-      analysis.values[AC_REASON] = "Trade request monitor";
-      analysis.values[AC_REASON_DETAIL] = "SendFailed=" + IntegerToString(RequestEvaluationCount(REQUEST_SEND_FAILED)) +
-         ";ExecutionFailed=" + IntegerToString(RequestEvaluationCount(REQUEST_EXECUTION_FAILED)) +
-         ";ExecutionSucceeded=" + IntegerToString(RequestEvaluationCount(REQUEST_EXECUTION_SUCCEEDED)) +
-         ";Requests=" + IntegerToString(count);
-      WriteAnalysisRecord(analysis);
+      string outcome = evaluation == REQUEST_SEND_FAILED ? "SEND_FAILED" :
+         (evaluation == REQUEST_EXECUTION_FAILED ? "EXECUTION_FAILED" : "SUCCEEDED");
+      PrintFormat("取引リクエスト頻度警告 時刻=%s 直近60秒=%d 種別=%s 結果=%s retcode=%u 成功=%d 実行失敗=%d 送信失敗=%d",
+                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS), count, requestType, outcome, retcode,
+                  RequestEvaluationCount(REQUEST_EXECUTION_SUCCEEDED),
+                  RequestEvaluationCount(REQUEST_EXECUTION_FAILED),
+                  RequestEvaluationCount(REQUEST_SEND_FAILED));
    }
 }
 
@@ -1538,16 +1568,19 @@ public:
       g_M15Signal.macdCrossDir = m_macdCrossDir;
       g_M15Signal.pendingNextM1 = true;
 
-      SAnalysisRecord analysis;
-      ResetAnalysisRecord(analysis, "M15_UPDATE");
-      SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-      analysis.values[AC_M15_BAR_TIME] = AnalysisDateTime(iTime(_Symbol, PERIOD_M15, 1));
-      analysis.values[AC_M15_RSI] = AnalysisNumber(latestRsi, 3);
-      analysis.values[AC_M15_MACD_MAIN] = AnalysisNumber(latestMacdMain, 5);
-      analysis.values[AC_M15_MACD_SIGNAL] = AnalysisNumber(latestMacdSig, 5);
-      analysis.values[AC_M15_MACD_HISTOGRAM] = AnalysisNumber(latestMacdHist, 5);
-      analysis.values[AC_M15_MACD_CROSS] = m_macdCross ? AnalysisDirection(m_macdCrossDir) : "NONE";
-      WriteAnalysisRecord(analysis);
+      if (EnableAnalysisCsv)
+      {
+         SAnalysisRecord analysis;
+         ResetAnalysisRecord(analysis, "M15_UPDATE");
+         SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
+         analysis.values[AC_M15_BAR_TIME] = AnalysisDateTime(iTime(_Symbol, PERIOD_M15, 1));
+         analysis.values[AC_M15_RSI] = AnalysisNumber(latestRsi, 3);
+         analysis.values[AC_M15_MACD_MAIN] = AnalysisNumber(latestMacdMain, 5);
+         analysis.values[AC_M15_MACD_SIGNAL] = AnalysisNumber(latestMacdSig, 5);
+         analysis.values[AC_M15_MACD_HISTOGRAM] = AnalysisNumber(latestMacdHist, 5);
+         analysis.values[AC_M15_MACD_CROSS] = m_macdCross ? AnalysisDirection(m_macdCrossDir) : "NONE";
+         WriteAnalysisRecord(analysis);
+      }
       return(true);
    }
    TrendState getState() const { return (m_state); }
@@ -1675,34 +1708,37 @@ public:
          LogInvalidArrayValues("M1 Low", m1Low);
          LogInvalidArrayValues("M1 Close", m1Close);
       }
-      MqlRates rates[];
-      ArrayResize(rates, 2);
-      ArraySetAsSeries(rates, true);
-      if (CopyRates(_Symbol, PERIOD_M1, 0, 2, rates) == 2)
+      if (EnableAnalysisCsv)
       {
-         datetime currentM1BarTime = rates[1].time;
-         if (g_lastM1CsvBarTime == 0 || currentM1BarTime != g_lastM1CsvBarTime)
+         MqlRates rates[];
+         ArrayResize(rates, 2);
+         ArraySetAsSeries(rates, true);
+         if (CopyRates(_Symbol, PERIOD_M1, 0, 2, rates) == 2)
          {
-            SAnalysisRecord m1Analysis;
-            ResetAnalysisRecord(m1Analysis, "M1_UPDATE");
-            SetAnalysisContext(m1Analysis, (datetime)rates[1].time, AnalysisCurrentTimeMsc());
-            m1Analysis.values[AC_M1_BAR_TIME] = AnalysisDateTime(rates[1].time);
-            m1Analysis.values[AC_M1_OPEN] = AnalysisNumber(rates[1].open, _Digits);
-            m1Analysis.values[AC_M1_HIGH] = AnalysisNumber(rates[1].high, _Digits);
-            m1Analysis.values[AC_M1_LOW] = AnalysisNumber(rates[1].low, _Digits);
-            m1Analysis.values[AC_M1_CLOSE] = AnalysisNumber(rates[1].close, _Digits);
-            m1Analysis.values[AC_M1_TICK_VOLUME] = IntegerToString((int)rates[1].tick_volume);
-            m1Analysis.values[AC_M1_BB_UPPER] = AnalysisArrayValue(g_bbUpper, 1, _Digits);
-            m1Analysis.values[AC_M1_BB_MIDDLE] = AnalysisArrayValue(g_bbMiddle, 1, _Digits);
-            m1Analysis.values[AC_M1_BB_LOWER] = AnalysisArrayValue(g_bbLower, 1, _Digits);
-            m1Analysis.values[AC_M1_STOCH_K] = AnalysisArrayValue(g_stochK, 1, 3);
-            m1Analysis.values[AC_M1_STOCH_D] = AnalysisArrayValue(g_stochD, 1, 3);
-            m1Analysis.values[AC_M1_ATR] = AnalysisArrayValue(g_atr, 1, _Digits);
-            m1Analysis.values[AC_M1_SUPER_TREND] = AnalysisArrayValue(g_superTrend, 1, _Digits);
-            if (ArraySize(g_superTrendDir) > 1)
-               m1Analysis.values[AC_M1_SUPER_TREND_DIRECTION] = LogSuperTrendDirection(1);
-            WriteAnalysisRecord(m1Analysis);
-            g_lastM1CsvBarTime = currentM1BarTime;
+            datetime currentM1BarTime = rates[1].time;
+            if (g_lastM1CsvBarTime == 0 || currentM1BarTime != g_lastM1CsvBarTime)
+            {
+               SAnalysisRecord m1Analysis;
+               ResetAnalysisRecord(m1Analysis, "M1_UPDATE");
+               SetAnalysisContext(m1Analysis, (datetime)rates[1].time, AnalysisCurrentTimeMsc());
+               m1Analysis.values[AC_M1_BAR_TIME] = AnalysisDateTime(rates[1].time);
+               m1Analysis.values[AC_M1_OPEN] = AnalysisNumber(rates[1].open, _Digits);
+               m1Analysis.values[AC_M1_HIGH] = AnalysisNumber(rates[1].high, _Digits);
+               m1Analysis.values[AC_M1_LOW] = AnalysisNumber(rates[1].low, _Digits);
+               m1Analysis.values[AC_M1_CLOSE] = AnalysisNumber(rates[1].close, _Digits);
+               m1Analysis.values[AC_M1_TICK_VOLUME] = IntegerToString((int)rates[1].tick_volume);
+               m1Analysis.values[AC_M1_BB_UPPER] = AnalysisArrayValue(g_bbUpper, 1, _Digits);
+               m1Analysis.values[AC_M1_BB_MIDDLE] = AnalysisArrayValue(g_bbMiddle, 1, _Digits);
+               m1Analysis.values[AC_M1_BB_LOWER] = AnalysisArrayValue(g_bbLower, 1, _Digits);
+               m1Analysis.values[AC_M1_STOCH_K] = AnalysisArrayValue(g_stochK, 1, 3);
+               m1Analysis.values[AC_M1_STOCH_D] = AnalysisArrayValue(g_stochD, 1, 3);
+               m1Analysis.values[AC_M1_ATR] = AnalysisArrayValue(g_atr, 1, _Digits);
+               m1Analysis.values[AC_M1_SUPER_TREND] = AnalysisArrayValue(g_superTrend, 1, _Digits);
+               if (ArraySize(g_superTrendDir) > 1)
+                  m1Analysis.values[AC_M1_SUPER_TREND_DIRECTION] = LogSuperTrendDirection(1);
+               WriteAnalysisRecord(m1Analysis);
+               g_lastM1CsvBarTime = currentM1BarTime;
+            }
          }
       }
       g_m1AllOk = g_m1_bb_ok && g_m1_stoch_ok && g_m1_atr_ok && pricesOk;
@@ -2123,6 +2159,8 @@ string EntrySuppressionReasonText(int mask)
 void LogEntrySuppression(bool isBuy, double entryPrice, const string signal, int reasonMask,
                          const string detail, double ask, double bid)
 {
+   if (!EnableAnalysisCsv)
+      return;
    if (reasonMask == 0)
       return;
 
@@ -2166,7 +2204,7 @@ void LogEntrySuppression(bool isBuy, double entryPrice, const string signal, int
 // ===================================================================
 // 取引関連の補助関数
 // ===================================================================
-bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp)
+bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp, EntrySignalType signal)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -2175,9 +2213,10 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp)
    if (spreadPts > MaxAllowedSpread)
    {
       PrintFormat("発注中止：スプレッドが大きすぎます (%.1f)", spreadPts);
-      LogEntrySuppression(type == ORDER_TYPE_BUY, 0.0, "Order request",
-                          ENTRY_SUPPRESS_SPREAD, "Spread limit checked before OrderSend.",
-                          ask, bid);
+      if (EnableAnalysisCsv)
+         LogEntrySuppression(type == ORDER_TYPE_BUY, 0.0, "Order request",
+                             ENTRY_SUPPRESS_SPREAD, "Spread limit checked before OrderSend.",
+                             ask, bid);
       return (false);
    }
    MqlTradeRequest req;
@@ -2194,70 +2233,78 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp)
    req.sl = sl;
    req.tp = tp;
    req.type = type;
+   ulong requestTimeMsc = GetTickCount64();
    bool sent = OrderSend(req, res);
+   RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
+      ((res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
+       ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
+   RecordRequest(type == ORDER_TYPE_BUY ? "新規BUY発注" : "新規SELL発注",
+                 evaluation, res.retcode, requestTimeMsc);
    if (!sent)
    {
-      RecordRequest(REQUEST_SEND_FAILED, res.retcode);
       PrintFormat("発注失敗 type=%s price=%.5f lot=%.2f SL=%.5f TP=%.5f spread=%.1f magic=%I64d retcode=%d comment=%s err=%d", type == ORDER_TYPE_BUY ? "BUY" : "SELL", requestedPrice, volume, sl, tp, spreadPts, MagicNumber, res.retcode, res.comment, GetLastError());
-      LogEntrySuppression(type == ORDER_TYPE_BUY, requestedPrice, "Order request",
-                          ENTRY_SUPPRESS_SEND_FAILURE,
-                          StringFormat("OrderSend failed;retcode=%d", res.retcode), ask, bid);
+      if (EnableAnalysisCsv)
+         LogEntrySuppression(type == ORDER_TYPE_BUY, requestedPrice, "Order request",
+                             ENTRY_SUPPRESS_SEND_FAILURE,
+                             StringFormat("OrderSend failed;retcode=%d", res.retcode), ask, bid);
       return (false);
    }
    if (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL)
    {
-      RecordRequest(REQUEST_EXECUTION_FAILED, res.retcode);
       PrintFormat("発注実行失敗 type=%s price=%.5f lot=%.2f SL=%.5f TP=%.5f spread=%.1f magic=%I64d retcode=%d comment=%s err=%d", type == ORDER_TYPE_BUY ? "BUY" : "SELL", requestedPrice, volume, sl, tp, spreadPts, MagicNumber, res.retcode, res.comment, GetLastError());
-      LogEntrySuppression(type == ORDER_TYPE_BUY, requestedPrice, "Order request",
-                          ENTRY_SUPPRESS_SEND_FAILURE,
-                          StringFormat("Order execution rejected;retcode=%d", res.retcode), ask, bid);
+      if (EnableAnalysisCsv)
+         LogEntrySuppression(type == ORDER_TYPE_BUY, requestedPrice, "Order request",
+                             ENTRY_SUPPRESS_SEND_FAILURE,
+                             StringFormat("Order execution rejected;retcode=%d", res.retcode), ask, bid);
       return false;
    }
-   RecordRequest(REQUEST_EXECUTION_SUCCEEDED, res.retcode);
    bool isBuy = type == ORDER_TYPE_BUY;
-   double executionPrice = res.price;
-   SAnalysisRecord analysis;
-   ResetAnalysisRecord(analysis, "ENTRY");
-   datetime executionTime = TimeCurrent();
-   long executionTimeMsc = AnalysisCurrentTimeMsc();
-   long positionId = 0;
-   if (res.deal > 0)
+   if (EnableAnalysisCsv)
    {
-      ResetLastError();
-      if (HistoryDealSelect(res.deal))
+      double executionPrice = res.price;
+      SAnalysisRecord analysis;
+      ResetAnalysisRecord(analysis, "ENTRY");
+      datetime executionTime = TimeCurrent();
+      long executionTimeMsc = AnalysisCurrentTimeMsc();
+      long positionId = 0;
+      if (res.deal > 0)
       {
-         executionTime = (datetime)HistoryDealGetInteger(res.deal, DEAL_TIME);
-         executionTimeMsc = HistoryDealGetInteger(res.deal, DEAL_TIME_MSC);
-         positionId = HistoryDealGetInteger(res.deal, DEAL_POSITION_ID);
+         ResetLastError();
+         if (HistoryDealSelect(res.deal))
+         {
+            executionTime = (datetime)HistoryDealGetInteger(res.deal, DEAL_TIME);
+            executionTimeMsc = HistoryDealGetInteger(res.deal, DEAL_TIME_MSC);
+            positionId = HistoryDealGetInteger(res.deal, DEAL_POSITION_ID);
+         }
+         else
+            PrintFormat("Deal情報取得中止：Deal選択失敗 deal=%I64u error=%d", res.deal, GetLastError());
       }
-      else
-         PrintFormat("Deal情報取得中止：Deal選択失敗 deal=%I64u error=%d", res.deal, GetLastError());
+      SetAnalysisContext(analysis, executionTime, executionTimeMsc);
+      analysis.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
+      if (executionPrice > 0.0)
+         analysis.values[AC_PRICE] = AnalysisNumber(executionPrice, _Digits);
+      analysis.values[AC_BID] = AnalysisNumber(bid, _Digits);
+      analysis.values[AC_ASK] = AnalysisNumber(ask, _Digits);
+      analysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
+      analysis.values[AC_LOT] = AnalysisNumber(volume, 2);
+      analysis.values[AC_ORDER] = AnalysisLong((long)res.order);
+      analysis.values[AC_DEAL] = AnalysisLong((long)res.deal);
+      analysis.values[AC_REQUESTED_PRICE] = AnalysisNumber(requestedPrice, _Digits);
+      if (executionPrice > 0.0)
+         analysis.values[AC_EXECUTION_PRICE] = AnalysisNumber(executionPrice, _Digits);
+      analysis.values[AC_SL] = AnalysisNumber(sl, _Digits);
+      analysis.values[AC_TP] = AnalysisNumber(tp, _Digits);
+      analysis.values[AC_MAGIC_NUMBER] = AnalysisLong(MagicNumber);
+      analysis.values[AC_RETCODE] = IntegerToString((int)res.retcode);
+      analysis.values[AC_COMMENT] = res.comment;
+      if (positionId > 0)
+         analysis.values[AC_POSITION] = AnalysisLong(positionId);
+      WriteAnalysisRecord(analysis);
+      FlushTradeTickHistoryToCsv("ORDER", (long)res.order);
+      g_tradeTickWritePos = 0;
+      g_tradeTickCount = 0;
+      MarkAtr2EntryExecuted(isBuy, signal);
    }
-   SetAnalysisContext(analysis, executionTime, executionTimeMsc);
-   analysis.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
-   if (executionPrice > 0.0)
-      analysis.values[AC_PRICE] = AnalysisNumber(executionPrice, _Digits);
-   analysis.values[AC_BID] = AnalysisNumber(bid, _Digits);
-   analysis.values[AC_ASK] = AnalysisNumber(ask, _Digits);
-   analysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
-   analysis.values[AC_LOT] = AnalysisNumber(volume, 2);
-   analysis.values[AC_ORDER] = AnalysisLong((long)res.order);
-   analysis.values[AC_DEAL] = AnalysisLong((long)res.deal);
-   analysis.values[AC_REQUESTED_PRICE] = AnalysisNumber(requestedPrice, _Digits);
-   if (executionPrice > 0.0)
-      analysis.values[AC_EXECUTION_PRICE] = AnalysisNumber(executionPrice, _Digits);
-   analysis.values[AC_SL] = AnalysisNumber(sl, _Digits);
-   analysis.values[AC_TP] = AnalysisNumber(tp, _Digits);
-   analysis.values[AC_MAGIC_NUMBER] = AnalysisLong(MagicNumber);
-   analysis.values[AC_RETCODE] = IntegerToString((int)res.retcode);
-   analysis.values[AC_COMMENT] = res.comment;
-   if (positionId > 0)
-      analysis.values[AC_POSITION] = AnalysisLong(positionId);
-   WriteAnalysisRecord(analysis);
-   FlushTradeTickHistoryToCsv("ORDER", (long)res.order);
-   g_tradeTickWritePos = 0;
-   g_tradeTickCount = 0;
-   MarkAtr2EntryExecuted(isBuy);
    return (true);
 }
 
@@ -2269,7 +2316,7 @@ bool ClosePositionByTicket(ulong ticket, const string reason)
    if (!PositionSelectByTicket(ticket))
       return (false);
    long ptype = PositionGetInteger(POSITION_TYPE);
-   long positionId = PositionGetInteger(POSITION_IDENTIFIER);
+   long positionId = EnableAnalysisCsv ? PositionGetInteger(POSITION_IDENTIFIER) : 0;
    double vol = PositionGetDouble(POSITION_VOLUME);
    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2289,61 +2336,67 @@ bool ClosePositionByTicket(ulong ticket, const string reason)
    req.magic = MagicNumber;
    req.price = requestedPrice;
    req.type = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   ulong requestTimeMsc = GetTickCount64();
    bool sent = OrderSend(req, res);
+   RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
+      ((res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
+       ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
+   RecordRequest(ptype == POSITION_TYPE_BUY ? "BUYポジション決済" : "SELLポジション決済",
+                 evaluation, res.retcode, requestTimeMsc);
    if (!sent)
    {
-      RecordRequest(REQUEST_SEND_FAILED, res.retcode);
       PrintFormat("決済失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
       return (false);
    }
    if (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL)
    {
-      RecordRequest(REQUEST_EXECUTION_FAILED, res.retcode);
       PrintFormat("決済実行失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
       return false;
    }
-   RecordRequest(REQUEST_EXECUTION_SUCCEEDED, res.retcode);
-   double closePrice = res.price;
-   SAnalysisRecord analysis;
-   ResetAnalysisRecord(analysis, "EXIT");
-   datetime executionTime = TimeCurrent();
-   long executionTimeMsc = AnalysisCurrentTimeMsc();
-   if (res.deal > 0)
+   if (EnableAnalysisCsv)
    {
-      ResetLastError();
-      if (HistoryDealSelect(res.deal))
+      double closePrice = res.price;
+      SAnalysisRecord analysis;
+      ResetAnalysisRecord(analysis, "EXIT");
+      datetime executionTime = TimeCurrent();
+      long executionTimeMsc = AnalysisCurrentTimeMsc();
+      if (res.deal > 0)
       {
-         executionTime = (datetime)HistoryDealGetInteger(res.deal, DEAL_TIME);
-         executionTimeMsc = HistoryDealGetInteger(res.deal, DEAL_TIME_MSC);
+         ResetLastError();
+         if (HistoryDealSelect(res.deal))
+         {
+            executionTime = (datetime)HistoryDealGetInteger(res.deal, DEAL_TIME);
+            executionTimeMsc = HistoryDealGetInteger(res.deal, DEAL_TIME_MSC);
+         }
+         else
+            PrintFormat("Deal情報取得中止：Deal選択失敗 deal=%I64u error=%d", res.deal, GetLastError());
       }
-      else
-         PrintFormat("Deal情報取得中止：Deal選択失敗 deal=%I64u error=%d", res.deal, GetLastError());
+      SetAnalysisContext(analysis, executionTime, executionTimeMsc);
+      analysis.values[AC_DIRECTION] = ptype == POSITION_TYPE_BUY ? "BUY" : "SELL";
+      analysis.values[AC_TICKET] = AnalysisLong((long)ticket);
+      analysis.values[AC_POSITION] = AnalysisLong(positionId);
+      analysis.values[AC_ENTRY_PRICE] = AnalysisNumber(openPrice, _Digits);
+      if (closePrice > 0.0)
+      {
+         analysis.values[AC_PRICE] = AnalysisNumber(closePrice, _Digits);
+         analysis.values[AC_EXIT_PRICE] = AnalysisNumber(closePrice, _Digits);
+      }
+      analysis.values[AC_LOT] = AnalysisNumber(vol, 2);
+      analysis.values[AC_BID] = AnalysisNumber(bid, _Digits);
+      analysis.values[AC_ASK] = AnalysisNumber(ask, _Digits);
+      analysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
+      analysis.values[AC_REASON] = reason;
+      analysis.values[AC_REASON_DETAIL] = "EA close request; actual Deal reason is recorded separately in DEAL.";
+      analysis.values[AC_MAGIC_NUMBER] = AnalysisLong(MagicNumber);
+      analysis.values[AC_RETCODE] = IntegerToString((int)res.retcode);
+      analysis.values[AC_COMMENT] = res.comment;
+      analysis.values[AC_DEAL] = AnalysisLong((long)res.deal);
+      analysis.values[AC_ORDER] = AnalysisLong((long)res.order);
+      WriteAnalysisRecord(analysis);
+      FlushTradeTickHistoryToCsv("CLOSE", (long)ticket);
+      g_tradeTickWritePos = 0;
+      g_tradeTickCount = 0;
    }
-   SetAnalysisContext(analysis, executionTime, executionTimeMsc);
-   analysis.values[AC_DIRECTION] = ptype == POSITION_TYPE_BUY ? "BUY" : "SELL";
-   analysis.values[AC_TICKET] = AnalysisLong((long)ticket);
-   analysis.values[AC_POSITION] = AnalysisLong(positionId);
-   analysis.values[AC_ENTRY_PRICE] = AnalysisNumber(openPrice, _Digits);
-   if (closePrice > 0.0)
-   {
-      analysis.values[AC_PRICE] = AnalysisNumber(closePrice, _Digits);
-      analysis.values[AC_EXIT_PRICE] = AnalysisNumber(closePrice, _Digits);
-   }
-   analysis.values[AC_LOT] = AnalysisNumber(vol, 2);
-   analysis.values[AC_BID] = AnalysisNumber(bid, _Digits);
-   analysis.values[AC_ASK] = AnalysisNumber(ask, _Digits);
-   analysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
-   analysis.values[AC_REASON] = reason;
-   analysis.values[AC_REASON_DETAIL] = "EA close request; actual Deal reason is recorded separately in DEAL.";
-   analysis.values[AC_MAGIC_NUMBER] = AnalysisLong(MagicNumber);
-   analysis.values[AC_RETCODE] = IntegerToString((int)res.retcode);
-   analysis.values[AC_COMMENT] = res.comment;
-   analysis.values[AC_DEAL] = AnalysisLong((long)res.deal);
-   analysis.values[AC_ORDER] = AnalysisLong((long)res.order);
-   WriteAnalysisRecord(analysis);
-   FlushTradeTickHistoryToCsv("CLOSE", (long)ticket);
-   g_tradeTickWritePos = 0;
-   g_tradeTickCount = 0;
    return (true);
 }
 
@@ -2376,34 +2429,38 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
    long ptype = PositionGetInteger(POSITION_TYPE);
    double currentSL = PositionGetDouble(POSITION_SL);
    double currentPrice = ptype == POSITION_TYPE_BUY ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   ulong requestTimeMsc = GetTickCount64();
    bool sent = trade.PositionModify(ticket, newSL, newTP);
    uint retcode = trade.ResultRetcode();
+   RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
+      (retcode == TRADE_RETCODE_DONE ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
+   RecordRequest("ポジションSL/TP変更", evaluation, retcode, requestTimeMsc);
    if (!sent)
    {
-      RecordRequest(REQUEST_SEND_FAILED, retcode);
       PrintFormat("SL更新失敗 ticket=%I64u type=%s currentSL=%.5f newSL=%.5f price=%.5f retcode=%d comment=%s err=%d", ticket, ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", currentSL, newSL, currentPrice, retcode, trade.ResultComment(), GetLastError());
       return (false);
    }
    if (retcode != TRADE_RETCODE_DONE)
    {
-      RecordRequest(REQUEST_EXECUTION_FAILED, retcode);
       PrintFormat("SL更新実行失敗 ticket=%I64u type=%s currentSL=%.5f newSL=%.5f price=%.5f retcode=%d comment=%s err=%d", ticket, ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", currentSL, newSL, currentPrice, retcode, trade.ResultComment(), GetLastError());
       return false;
    }
-   RecordRequest(REQUEST_EXECUTION_SUCCEEDED, retcode);
-   SAnalysisRecord analysis;
-   ResetAnalysisRecord(analysis, "SL_UPDATE");
-   SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-   analysis.values[AC_TICKET] = AnalysisLong((long)ticket);
-   analysis.values[AC_POSITION] = AnalysisLong((long)ticket);
-   analysis.values[AC_DIRECTION] = ptype == POSITION_TYPE_BUY ? "BUY" : "SELL";
-   analysis.values[AC_PRICE] = AnalysisNumber(currentPrice, _Digits);
-   analysis.values[AC_SL] = AnalysisNumber(newSL, _Digits);
-   analysis.values[AC_REASON] = "Trailing Stop";
-   analysis.values[AC_MAGIC_NUMBER] = AnalysisLong(MagicNumber);
-   analysis.values[AC_RETCODE] = IntegerToString((int)retcode);
-   analysis.values[AC_COMMENT] = trade.ResultComment();
-   WriteAnalysisRecord(analysis);
+   if (EnableAnalysisCsv)
+   {
+      SAnalysisRecord analysis;
+      ResetAnalysisRecord(analysis, "SL_UPDATE");
+      SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
+      analysis.values[AC_TICKET] = AnalysisLong((long)ticket);
+      analysis.values[AC_POSITION] = AnalysisLong((long)ticket);
+      analysis.values[AC_DIRECTION] = ptype == POSITION_TYPE_BUY ? "BUY" : "SELL";
+      analysis.values[AC_PRICE] = AnalysisNumber(currentPrice, _Digits);
+      analysis.values[AC_SL] = AnalysisNumber(newSL, _Digits);
+      analysis.values[AC_REASON] = "Trailing Stop";
+      analysis.values[AC_MAGIC_NUMBER] = AnalysisLong(MagicNumber);
+      analysis.values[AC_RETCODE] = IntegerToString((int)retcode);
+      analysis.values[AC_COMMENT] = trade.ResultComment();
+      WriteAnalysisRecord(analysis);
+   }
    return (true);
 }
 
@@ -2633,7 +2690,7 @@ void UpdateWeekendSessionSchedule(datetime now)
    g_weekendNextSessionStart = nextSessionStart;
    g_weekendEntryStopTime = stopTime;
    g_weekendForceCloseTime = forceTime;
-   if (changed)
+   if (changed && EnableAnalysisCsv)
    {
       SAnalysisRecord analysis;
       ResetAnalysisRecord(analysis, "WEEKEND");
@@ -2655,12 +2712,15 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
       g_weekendTargetValid = false;
       g_weekendEntryStopped = false;
       g_weekendForceCloseActive = false;
-      SAnalysisRecord analysis;
-      ResetAnalysisRecord(analysis, "WEEKEND");
-      SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
-      analysis.values[AC_REASON] = "Weekend stop released";
-      analysis.values[AC_REASON_DETAIL] = "NextSessionStart=" + AnalysisDateTime(now);
-      WriteAnalysisRecord(analysis);
+      if (EnableAnalysisCsv)
+      {
+         SAnalysisRecord analysis;
+         ResetAnalysisRecord(analysis, "WEEKEND");
+         SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
+         analysis.values[AC_REASON] = "Weekend stop released";
+         analysis.values[AC_REASON_DETAIL] = "NextSessionStart=" + AnalysisDateTime(now);
+         WriteAnalysisRecord(analysis);
+      }
       UpdateWeekendSessionSchedule(now);
    }
 
@@ -2672,21 +2732,27 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
    if (now >= g_weekendEntryStopTime && !g_weekendEntryStopped)
    {
       g_weekendEntryStopped = true;
-      SAnalysisRecord analysis;
-      ResetAnalysisRecord(analysis, "WEEKEND");
-      SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
-      analysis.values[AC_REASON] = "New entries stopped";
-      WriteAnalysisRecord(analysis);
+      if (EnableAnalysisCsv)
+      {
+         SAnalysisRecord analysis;
+         ResetAnalysisRecord(analysis, "WEEKEND");
+         SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
+         analysis.values[AC_REASON] = "New entries stopped";
+         WriteAnalysisRecord(analysis);
+      }
    }
    if (now >= g_weekendForceCloseTime && !g_weekendForceCloseActive)
    {
       g_weekendEntryStopped = true;
       g_weekendForceCloseActive = true;
-      SAnalysisRecord analysis;
-      ResetAnalysisRecord(analysis, "WEEKEND");
-      SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
-      analysis.values[AC_REASON] = "Force close started";
-      WriteAnalysisRecord(analysis);
+      if (EnableAnalysisCsv)
+      {
+         SAnalysisRecord analysis;
+         ResetAnalysisRecord(analysis, "WEEKEND");
+         SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
+         analysis.values[AC_REASON] = "Force close started";
+         WriteAnalysisRecord(analysis);
+      }
       for (int i = PositionsTotal() - 1; i >= 0; i--)
       {
          ulong ticket = PositionGetTicket(i);
@@ -2694,21 +2760,24 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
             continue;
          if (PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
             continue;
-         MqlTick tick;
-         ZeroMemory(tick);
-         SymbolInfoTick(_Symbol, tick);
-         double spreadPts = (tick.ask - tick.bid) / _Point;
-         SAnalysisRecord closeAnalysis;
-         ResetAnalysisRecord(closeAnalysis, "WEEKEND");
-         SetAnalysisContext(closeAnalysis, now, tick.time_msc);
-         closeAnalysis.values[AC_REASON] = "Force close position";
-         closeAnalysis.values[AC_DIRECTION] = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL";
-         closeAnalysis.values[AC_TICKET] = AnalysisLong((long)ticket);
-         closeAnalysis.values[AC_POSITION] = AnalysisLong(PositionGetInteger(POSITION_IDENTIFIER));
-         closeAnalysis.values[AC_BID] = AnalysisNumber(tick.bid, _Digits);
-         closeAnalysis.values[AC_ASK] = AnalysisNumber(tick.ask, _Digits);
-         closeAnalysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
-         WriteAnalysisRecord(closeAnalysis);
+         if (EnableAnalysisCsv)
+         {
+            MqlTick tick;
+            ZeroMemory(tick);
+            SymbolInfoTick(_Symbol, tick);
+            double spreadPts = (tick.ask - tick.bid) / _Point;
+            SAnalysisRecord closeAnalysis;
+            ResetAnalysisRecord(closeAnalysis, "WEEKEND");
+            SetAnalysisContext(closeAnalysis, now, tick.time_msc);
+            closeAnalysis.values[AC_REASON] = "Force close position";
+            closeAnalysis.values[AC_DIRECTION] = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL";
+            closeAnalysis.values[AC_TICKET] = AnalysisLong((long)ticket);
+            closeAnalysis.values[AC_POSITION] = AnalysisLong(PositionGetInteger(POSITION_IDENTIFIER));
+            closeAnalysis.values[AC_BID] = AnalysisNumber(tick.bid, _Digits);
+            closeAnalysis.values[AC_ASK] = AnalysisNumber(tick.ask, _Digits);
+            closeAnalysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
+            WriteAnalysisRecord(closeAnalysis);
+         }
          ClosePositionByTicket(ticket, "週末休場前の強制決済");
       }
    }
@@ -2723,28 +2792,37 @@ int OnInit()
 {
    OpenAnalysisCsv();
 
-   g_nextAtr2EventId = 1;
+   if (EnableAnalysisCsv)
+      g_nextAtr2EventId = 1;
    g_atr2BuyEvent.active = false;
-   g_atr2BuyEvent.eventId = 0;
+   if (EnableAnalysisCsv)
+      g_atr2BuyEvent.eventId = 0;
    g_atr2BuyEvent.tickIndex = 0;
    g_atr2BuyEvent.startTimeMsc = 0;
    g_atr2SellEvent.active = false;
-   g_atr2SellEvent.eventId = 0;
+   if (EnableAnalysisCsv)
+      g_atr2SellEvent.eventId = 0;
    g_atr2SellEvent.tickIndex = 0;
    g_atr2SellEvent.startTimeMsc = 0;
-   g_pendingAtr2BuyRecordValid = false;
-   g_pendingAtr2SellRecordValid = false;
-   g_tradeTickWritePos = 0;
-   g_tradeTickCount = 0;
-   ArrayResize(g_tradeTickHistory, tradeTickHistorySize);
+   if (EnableAnalysisCsv)
+   {
+      g_pendingAtr2BuyRecordValid = false;
+      g_pendingAtr2SellRecordValid = false;
+      g_tradeTickWritePos = 0;
+      g_tradeTickCount = 0;
+      ArrayResize(g_tradeTickHistory, tradeTickHistorySize);
+   }
    g_atr2M1BarTime = 0;
 
-   StartTimeGlobal = TimeCurrent();
-   SAnalysisRecord startAnalysis;
-   ResetAnalysisRecord(startAnalysis, "OTHER_ANALYSIS");
-   SetAnalysisContext(startAnalysis, StartTimeGlobal, AnalysisCurrentTimeMsc());
-   startAnalysis.values[AC_REASON] = "EA initialized";
-   WriteAnalysisRecord(startAnalysis);
+   if (EnableAnalysisCsv)
+   {
+      StartTimeGlobal = TimeCurrent();
+      SAnalysisRecord startAnalysis;
+      ResetAnalysisRecord(startAnalysis, "OTHER_ANALYSIS");
+      SetAnalysisContext(startAnalysis, StartTimeGlobal, AnalysisCurrentTimeMsc());
+      startAnalysis.values[AC_REASON] = "EA initialized";
+      WriteAnalysisRecord(startAnalysis);
+   }
 
    EventSetTimer(1);
 
@@ -2840,9 +2918,9 @@ void OnDeinit(const int reason)
 {
    ProcessPendingTradeEvents();
    FlushPendingAtr2Records();
-   if (ArraySize(g_pendingTradeEvents) > 0)
+   if (EnableAnalysisCsv && ArraySize(g_pendingTradeEvents) > 0)
       PrintFormat("未処理の取引Dealイベントが終了時に残っています。件数=%d", ArraySize(g_pendingTradeEvents));
-   if (g_pendingAtr2BuyRecordValid || g_pendingAtr2SellRecordValid)
+   if (EnableAnalysisCsv && (g_pendingAtr2BuyRecordValid || g_pendingAtr2SellRecordValid))
       Print("未書き込みのATR2レコードが終了時に残っています。");
    if (g_analysisFile != INVALID_HANDLE)
    {
@@ -2881,10 +2959,11 @@ void OnDeinit(const int reason)
       FileClose(g_analysisFile);
       g_analysisFile = INVALID_HANDLE;
    }
-   PrintFormat("解析CSV書き込み件数：成功=%I64d 失敗=%I64d 未処理Deal=%d ATR2保留=%s",
-               g_analysisWriteSuccessCount, g_analysisWriteFailureCount,
-               ArraySize(g_pendingTradeEvents),
-               (g_pendingAtr2BuyRecordValid || g_pendingAtr2SellRecordValid) ? "true" : "false");
+   if (EnableAnalysisCsv)
+      PrintFormat("解析CSV書き込み件数：成功=%I64d 失敗=%I64d 未処理Deal=%d ATR2保留=%s",
+                  g_analysisWriteSuccessCount, g_analysisWriteFailureCount,
+                  ArraySize(g_pendingTradeEvents),
+                  (g_pendingAtr2BuyRecordValid || g_pendingAtr2SellRecordValid) ? "true" : "false");
 }
 
 // ===================================================================
@@ -2919,7 +2998,19 @@ string LogSuperTrendDirection(int index)
 
 string EntrySignalToString(EntrySignalType signal)
 {
+   if (!EnableAnalysisCsv)
+      return "";
    return EnumToString(signal);
+}
+
+void StoreLastTrendEntrySignal(bool isBuy, EntrySignalType signal)
+{
+   if (!EnableAnalysisCsv)
+      return;
+   if (isBuy)
+      g_lastTrendEntrySignalBuy = signal;
+   else
+      g_lastTrendEntrySignalSell = signal;
 }
 
 EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
@@ -2947,19 +3038,19 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
       bool atr2Ok = g_atr2BuyEvent.active && g_atr2BuyEvent.tickIndex >= 3 &&
                     SymbolInfoDouble(_Symbol, SYMBOL_ASK) > g_currentAtr2BoundaryBuy &&
                     (atr2MinExtensionSeconds <= 0.0 || buyAtr2ElapsedMs >= (long)(atr2MinExtensionSeconds * 1000.0));
-      if (trendUp && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendDir[1] > 0 && atr2Ok)
+      if (trendUp && g_superTrendDir[1] > 0 && atr2Ok)
       {
          signal = ENTRY_SIGNAL_ATR2_EXTENSION;
-         g_lastTrendEntrySignalBuy = signal;
+         StoreLastTrendEntrySignal(true, signal);
          return signal;
       }
-      if (trendUp && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendDir[1] > 0 && g_superTrendReaccelBuy)
+      if (trendUp && g_superTrendDir[1] > 0 && g_superTrendReaccelBuy)
       {
          signal = ENTRY_SIGNAL_REACCEL;
-         g_lastTrendEntrySignalBuy = signal;
+         StoreLastTrendEntrySignal(true, signal);
          return signal;
       }
-      if (trendUp && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendDir[1] > 0)
+      if (trendUp && g_superTrendDir[1] > 0)
       {
          if (g_initialBreakoutPriceReady && bbWidth / atr >= initialBreakoutMinBBATR)
          {
@@ -2967,7 +3058,7 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
             if (currentAsk > g_initialBreakoutHighestHigh && (currentAsk - g_bbMiddle[1]) <= atr * initialBreakoutMaxExtensionATR)
             {
                signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
-               g_lastTrendEntrySignalBuy = signal;
+               StoreLastTrendEntrySignal(true, signal);
                return signal;
             }
          }
@@ -2987,7 +3078,7 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
                    g_m1Close[1] - g_bbMiddle[1] <= atr * continuationMaxExtensionATR)
                {
                   signal = ENTRY_SIGNAL_CONTINUATION;
-                  g_lastTrendEntrySignalBuy = signal;
+                  StoreLastTrendEntrySignal(true, signal);
                   return signal;
                }
             }
@@ -2999,19 +3090,19 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
       bool atr2Ok = g_atr2SellEvent.active && g_atr2SellEvent.tickIndex >= 3 &&
                     SymbolInfoDouble(_Symbol, SYMBOL_BID) < g_currentAtr2BoundarySell &&
                     (atr2MinExtensionSeconds <= 0.0 || sellAtr2ElapsedMs >= (long)(atr2MinExtensionSeconds * 1000.0));
-      if (trendDown && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendDir[1] < 0 && atr2Ok)
+      if (trendDown && g_superTrendDir[1] < 0 && atr2Ok)
       {
          signal = ENTRY_SIGNAL_ATR2_EXTENSION;
-         g_lastTrendEntrySignalSell = signal;
+         StoreLastTrendEntrySignal(false, signal);
          return signal;
       }
-      if (trendDown && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendDir[1] < 0 && g_superTrendReaccelSell)
+      if (trendDown && g_superTrendDir[1] < 0 && g_superTrendReaccelSell)
       {
          signal = ENTRY_SIGNAL_REACCEL;
-         g_lastTrendEntrySignalSell = signal;
+         StoreLastTrendEntrySignal(false, signal);
          return signal;
       }
-      if (trendDown && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendDir[1] < 0)
+      if (trendDown && g_superTrendDir[1] < 0)
       {
          if (g_initialBreakoutPriceReady && bbWidth / atr >= initialBreakoutMinBBATR)
          {
@@ -3019,7 +3110,7 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
             if (currentBid < g_initialBreakoutLowestLow && (g_bbMiddle[1] - currentBid) <= atr * initialBreakoutMaxExtensionATR)
             {
                signal = ENTRY_SIGNAL_INITIAL_BREAKOUT;
-               g_lastTrendEntrySignalSell = signal;
+               StoreLastTrendEntrySignal(false, signal);
                return signal;
             }
          }
@@ -3039,7 +3130,7 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
                    g_bbMiddle[1] - g_m1Close[1] <= atr * continuationMaxExtensionATR)
                {
                   signal = ENTRY_SIGNAL_CONTINUATION;
-                  g_lastTrendEntrySignalSell = signal;
+                  StoreLastTrendEntrySignal(false, signal);
                   return signal;
                }
             }
@@ -3047,10 +3138,7 @@ EntrySignalType EvaluateTrendEntrySignal(bool isBuy)
       }
    }
 
-   if (isBuy)
-      g_lastTrendEntrySignalBuy = ENTRY_SIGNAL_NONE;
-   else
-      g_lastTrendEntrySignalSell = ENTRY_SIGNAL_NONE;
+   StoreLastTrendEntrySignal(isBuy, ENTRY_SIGNAL_NONE);
    return ENTRY_SIGNAL_NONE;
 }
 
@@ -3062,6 +3150,8 @@ void EvaluateCloseConditions(bool isBuy, double currentPrice, bool &stochasticCo
 void LogCloseConditionAnalysis(bool isBuy, ulong ticket, ulong positionId, double currentPrice,
                                bool stochasticCondition)
 {
+   if (!EnableAnalysisCsv)
+      return;
    SAnalysisRecord analysis;
    ResetAnalysisRecord(analysis, "EXIT_SIGNAL");
    SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
@@ -3130,7 +3220,9 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
    bool isBuy = posType == POSITION_TYPE_BUY;
    bool isTrend = IsDirectionalTrendType(g_TrendTypeH);
    bool isRange = g_TrendTypeH == TREND_RANGE;
-   string signalText = isBuy ? EnumToString(g_lastTrendEntrySignalBuy) : EnumToString(g_lastTrendEntrySignalSell);
+   string signalText = "";
+   if (EnableAnalysisCsv)
+      signalText = isBuy ? EnumToString(g_lastTrendEntrySignalBuy) : EnumToString(g_lastTrendEntrySignalSell);
    if (!g_h1AllOk || !g_m15AllOk || !g_m1AllOk)
    {
       LogEntrySuppression(isBuy, entryPrice, signalText, ENTRY_SUPPRESS_INDICATOR,
@@ -3145,17 +3237,23 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
    }
 
    EntrySignalType signal = EvaluateTrendEntrySignal(isBuy);
-   if (signal != ENTRY_SIGNAL_NONE)
+   if (signal == ENTRY_SIGNAL_NONE)
+   {
+      if (!isRange)
+         return;
+      if (EnableAnalysisCsv)
+         signalText = "RANGE_BB_REENTRY";
+   }
+   else if (EnableAnalysisCsv)
       signalText = EntrySignalToString(signal);
-   else if (isRange)
-      signalText = "RANGE_BB_REENTRY";
-   else
-      return;
 
-   if (isBuy && g_pendingAtr2BuyRecordValid && g_pendingAtr2BuyRecord.values[AC_TIME_MSC] == AnalysisLong(g_currentAtr2TickTimeMsc))
-      g_pendingAtr2BuyRecord.values[AC_ENTRY_SIGNAL] = signalText;
-   if (!isBuy && g_pendingAtr2SellRecordValid && g_pendingAtr2SellRecord.values[AC_TIME_MSC] == AnalysisLong(g_currentAtr2TickTimeMsc))
-      g_pendingAtr2SellRecord.values[AC_ENTRY_SIGNAL] = signalText;
+   if (EnableAnalysisCsv)
+   {
+      if (isBuy && g_pendingAtr2BuyRecordValid && g_pendingAtr2BuyRecord.values[AC_TIME_MSC] == AnalysisLong(g_currentAtr2TickTimeMsc))
+         g_pendingAtr2BuyRecord.values[AC_ENTRY_SIGNAL] = signalText;
+      if (!isBuy && g_pendingAtr2SellRecordValid && g_pendingAtr2SellRecord.values[AC_TIME_MSC] == AnalysisLong(g_currentAtr2TickTimeMsc))
+         g_pendingAtr2SellRecord.values[AC_ENTRY_SIGNAL] = signalText;
+   }
 
    if (isRange)
    {
@@ -3184,9 +3282,11 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
 
    int sameDirCount = isBuy ? BuyCount : SellCount;
    bool allowPyramid = false;
-   if (g_TrendTypeH == TREND_STRONG_UP && isBuy && g_H1DiDir == 1 && g_H1EmaDir == 1 && g_superTrendReaccelBuy)
+   if (sameDirCount > 0 && g_TrendTypeH == TREND_STRONG_UP && isBuy &&
+       g_H1DiDir == 1 && g_H1EmaDir == 1)
       allowPyramid = true;
-   if (g_TrendTypeH == TREND_STRONG_DOWN && !isBuy && g_H1DiDir == -1 && g_H1EmaDir == -1 && g_superTrendReaccelSell)
+   if (sameDirCount > 0 && g_TrendTypeH == TREND_STRONG_DOWN && !isBuy &&
+       g_H1DiDir == -1 && g_H1EmaDir == -1)
       allowPyramid = true;
 
    int suppressionReasons = 0;
@@ -3194,49 +3294,58 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
    if (g_weekendEntryStopped)
    {
       suppressionReasons |= ENTRY_SUPPRESS_WEEKEND;
-      suppressionDetails += "Weekend schedule stopped new entries;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "Weekend schedule stopped new entries;";
    }
    if (isTrend && !EnableTrendTrading)
    {
       suppressionReasons |= ENTRY_SUPPRESS_TREND_SETTING;
-      suppressionDetails += "EnableTrendTrading=false;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "EnableTrendTrading=false;";
    }
    if (isRange && !EnableRangeTrading)
    {
       suppressionReasons |= ENTRY_SUPPRESS_RANGE_SETTING;
-      suppressionDetails += "EnableRangeTrading=false;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "EnableRangeTrading=false;";
    }
    if (!isTrend && !isRange)
    {
       suppressionReasons |= ENTRY_SUPPRESS_H1_DIRECTION;
-      suppressionDetails += "H1 classification is not tradable;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "H1 classification is not tradable;";
    }
    if (isTrend && ((isBuy && (g_H1DiDir != 1 || ArraySize(g_superTrendDir) <= 1 || g_superTrendDir[1] <= 0)) ||
                    (!isBuy && (g_H1DiDir != -1 || ArraySize(g_superTrendDir) <= 1 || g_superTrendDir[1] >= 0))))
    {
       suppressionReasons |= ENTRY_SUPPRESS_H1_DIRECTION;
-      suppressionDetails += "H1 DI or M1 SuperTrend direction mismatch;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "H1 DI or M1 SuperTrend direction mismatch;";
    }
    if ((isBuy && g_lastBuyCloseBarTime == LastM1) ||
        (!isBuy && g_lastSellCloseBarTime == LastM1))
    {
       suppressionReasons |= ENTRY_SUPPRESS_SAME_M1_CLOSE;
-      suppressionDetails += "Same-direction close already occurred on this M1 bar;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "Same-direction close already occurred on this M1 bar;";
    }
    if (allowPyramid && sameDirCount > 0 && !IsPyramidAllowedByM15(isBuy))
    {
       suppressionReasons |= ENTRY_SUPPRESS_M15_PYRAMID;
-      suppressionDetails += "Existing M15 pyramid restriction;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "Existing M15 pyramid restriction;";
    }
    if (!allowPyramid && sameDirCount >= maxPositionsNormal)
    {
       suppressionReasons |= ENTRY_SUPPRESS_POSITION_CAP;
-      suppressionDetails += "Normal same-direction position cap;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "Normal same-direction position cap;";
    }
    if (allowPyramid && sameDirCount >= maxPositionsPyramid)
    {
       suppressionReasons |= ENTRY_SUPPRESS_POSITION_CAP;
-      suppressionDetails += "Pyramid same-direction position cap;";
+      if (EnableAnalysisCsv)
+         suppressionDetails += "Pyramid same-direction position cap;";
    }
    if (suppressionReasons != 0)
    {
@@ -3295,47 +3404,48 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
 
    if (lot > 0)
    {
-      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-      double requiredMargin = 0.0;
-      bool marginCalculated = false;
-      if (OrderCalcMargin((isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL), _Symbol, lot, (isBuy ? ask : bid), requiredMargin))
+      if (EnableAnalysisCsv)
       {
-         marginCalculated = true;
+         double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+         double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+         double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+         double requiredMargin = 0.0;
+         bool marginCalculated = false;
+         if (OrderCalcMargin((isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL), _Symbol, lot, (isBuy ? ask : bid), requiredMargin))
+            marginCalculated = true;
+
+         SAnalysisRecord marginAnalysis;
+         ResetAnalysisRecord(marginAnalysis, "OTHER_ANALYSIS");
+         SetAnalysisContext(marginAnalysis, TimeCurrent(), AnalysisCurrentTimeMsc());
+         marginAnalysis.values[AC_REASON] = "Order margin check";
+         marginAnalysis.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
+         marginAnalysis.values[AC_LOT] = AnalysisNumber(lot, 2);
+         marginAnalysis.values[AC_BALANCE] = AnalysisNumber(balance, 2);
+         marginAnalysis.values[AC_EQUITY] = AnalysisNumber(equity, 2);
+         marginAnalysis.values[AC_FREE_MARGIN] = AnalysisNumber(freeMargin, 2);
+         if (marginCalculated)
+            marginAnalysis.values[AC_REQUIRED_MARGIN] = AnalysisNumber(requiredMargin, 2);
+         else
+            marginAnalysis.values[AC_REASON_DETAIL] = "OrderCalcMargin failed";
+         WriteAnalysisRecord(marginAnalysis);
+
+         SAnalysisRecord signalAnalysis;
+         ResetAnalysisRecord(signalAnalysis, "ENTRY_SIGNAL");
+         SetAnalysisContext(signalAnalysis, TimeCurrent(), AnalysisCurrentTimeMsc());
+         signalAnalysis.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
+         signalAnalysis.values[AC_ENTRY_SIGNAL] = signalText;
+         signalAnalysis.values[AC_SAME_DIRECTION_COUNT] = IntegerToString(sameDirCount);
+         signalAnalysis.values[AC_LOT] = AnalysisNumber(lot, 2);
+         signalAnalysis.values[AC_BID] = AnalysisNumber(bid, _Digits);
+         signalAnalysis.values[AC_ASK] = AnalysisNumber(ask, _Digits);
+         signalAnalysis.values[AC_SPREAD_POINTS] = AnalysisNumber((ask - bid) / _Point, 1);
+         signalAnalysis.values[AC_ENTRY_PRICE] = AnalysisNumber(entryPrice, _Digits);
+         signalAnalysis.values[AC_REASON] = isRange ? "Range entry conditions satisfied" : "Trend entry conditions satisfied";
+         WriteAnalysisRecord(signalAnalysis);
       }
 
-      SAnalysisRecord marginAnalysis;
-      ResetAnalysisRecord(marginAnalysis, "OTHER_ANALYSIS");
-      SetAnalysisContext(marginAnalysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-      marginAnalysis.values[AC_REASON] = "Order margin check";
-      marginAnalysis.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
-      marginAnalysis.values[AC_LOT] = AnalysisNumber(lot, 2);
-      marginAnalysis.values[AC_BALANCE] = AnalysisNumber(balance, 2);
-      marginAnalysis.values[AC_EQUITY] = AnalysisNumber(equity, 2);
-      marginAnalysis.values[AC_FREE_MARGIN] = AnalysisNumber(freeMargin, 2);
-      if (marginCalculated)
-         marginAnalysis.values[AC_REQUIRED_MARGIN] = AnalysisNumber(requiredMargin, 2);
-      else
-         marginAnalysis.values[AC_REASON_DETAIL] = "OrderCalcMargin failed";
-      WriteAnalysisRecord(marginAnalysis);
-
-      SAnalysisRecord signalAnalysis;
-      ResetAnalysisRecord(signalAnalysis, "ENTRY_SIGNAL");
-      SetAnalysisContext(signalAnalysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-      signalAnalysis.values[AC_DIRECTION] = isBuy ? "BUY" : "SELL";
-      signalAnalysis.values[AC_ENTRY_SIGNAL] = signalText;
-      signalAnalysis.values[AC_SAME_DIRECTION_COUNT] = IntegerToString(sameDirCount);
-      signalAnalysis.values[AC_LOT] = AnalysisNumber(lot, 2);
-      signalAnalysis.values[AC_BID] = AnalysisNumber(bid, _Digits);
-      signalAnalysis.values[AC_ASK] = AnalysisNumber(ask, _Digits);
-      signalAnalysis.values[AC_SPREAD_POINTS] = AnalysisNumber((ask - bid) / _Point, 1);
-      signalAnalysis.values[AC_ENTRY_PRICE] = AnalysisNumber(entryPrice, _Digits);
-      signalAnalysis.values[AC_REASON] = isRange ? "Range entry conditions satisfied" : "Trend entry conditions satisfied";
-      WriteAnalysisRecord(signalAnalysis);
-
       ENUM_ORDER_TYPE orderType = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      if (SendMarketOrder(orderType, lot, sl, tp))
+      if (SendMarketOrder(orderType, lot, sl, tp, signal))
       {
          if (isBuy)
          {
@@ -3358,10 +3468,13 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   MqlTick tick;
-   ZeroMemory(tick);
-   if (SymbolInfoTick(_Symbol, tick))
-      RecordTradeTickContext("TICK", 0, 0, tick, iTime(_Symbol, PERIOD_M1, 1));
+   if (EnableAnalysisCsv)
+   {
+      MqlTick tick;
+      ZeroMemory(tick);
+      if (SymbolInfoTick(_Symbol, tick))
+         RecordTradeTickContext("TICK", 0, 0, tick, iTime(_Symbol, PERIOD_M1, 1));
+   }
 
    MonitorAtr2ExtensionTicks();
 
@@ -3438,11 +3551,11 @@ void OnTick()
    {
       // PrintFormat("スプレッドが閾値を超えたため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント 閾値=%dポイント",
       //             ASK, BID, spreadPts, MaxAllowedSpread);
-      if (g_canEntryBuy)
+      if (EnableAnalysisCsv && g_canEntryBuy)
          LogEntrySuppression(true, g_entryPriceBuy, EnumToString(g_lastTrendEntrySignalBuy),
                              ENTRY_SUPPRESS_SPREAD, "OnTick spread filter.",
                              ASK, BID);
-      if (g_canEntrySell)
+      if (EnableAnalysisCsv && g_canEntrySell)
          LogEntrySuppression(false, g_entryPriceSell, EnumToString(g_lastTrendEntrySignalSell),
                              ENTRY_SUPPRESS_SPREAD, "OnTick spread filter.",
                              ASK, BID);
@@ -3453,10 +3566,11 @@ void OnTick()
    // エントリ判定は OnTimer で算出した価格・フラグを使用
    if (g_canEntryBuy && !EnableEntryOnCloseSignal && buyCloseSignal)
    {
-      LogEntrySuppression(true, g_entryPriceBuy, EnumToString(g_lastTrendEntrySignalBuy),
-                          ENTRY_SUPPRESS_CLOSE_SIGNAL,
-                          "EnableEntryOnCloseSignal=false while BUY close signal is active.",
-                          ASK, BID);
+      if (EnableAnalysisCsv)
+         LogEntrySuppression(true, g_entryPriceBuy, EnumToString(g_lastTrendEntrySignalBuy),
+                             ENTRY_SUPPRESS_CLOSE_SIGNAL,
+                             "EnableEntryOnCloseSignal=false while BUY close signal is active.",
+                             ASK, BID);
    }
    else
    {
@@ -3464,10 +3578,11 @@ void OnTick()
    }
    if (g_canEntrySell && !EnableEntryOnCloseSignal && sellCloseSignal)
    {
-      LogEntrySuppression(false, g_entryPriceSell, EnumToString(g_lastTrendEntrySignalSell),
-                          ENTRY_SUPPRESS_CLOSE_SIGNAL,
-                          "EnableEntryOnCloseSignal=false while SELL close signal is active.",
-                          ASK, BID);
+      if (EnableAnalysisCsv)
+         LogEntrySuppression(false, g_entryPriceSell, EnumToString(g_lastTrendEntrySignalSell),
+                             ENTRY_SUPPRESS_CLOSE_SIGNAL,
+                             "EnableEntryOnCloseSignal=false while SELL close signal is active.",
+                             ASK, BID);
    }
    else
    {
@@ -3485,6 +3600,8 @@ void OnTrade()
 
 void LogPositionSummary(string action)
 {
+   if (!EnableAnalysisCsv)
+      return;
    int buy = 0, sell = 0, total = 0;
    for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -3591,6 +3708,8 @@ bool IsTradeDealProcessed(ulong deal)
 
 void QueueTradeEvent(ulong deal, ulong order, ulong position)
 {
+   if (!EnableAnalysisCsv)
+      return;
    if (deal == 0 || IsTradeDealQueuedOrProcessed(deal))
       return;
    int size = ArraySize(g_pendingTradeEvents);
@@ -3619,6 +3738,8 @@ void RemovePendingTradeEvent(int index)
 
 int ProcessPendingTradeEvents()
 {
+   if (!EnableAnalysisCsv)
+      return 0;
    int processedCount = 0;
    int index = 0;
    while (index < ArraySize(g_pendingTradeEvents))
@@ -3761,6 +3882,8 @@ int ProcessPendingTradeEvents()
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
 {
+   if (!EnableAnalysisCsv)
+      return;
    if (trans.type == TRADE_TRANSACTION_DEAL_ADD)
       QueueTradeEvent(trans.deal, trans.order, trans.position);
 }
@@ -3823,20 +3946,23 @@ void OnTimer()
       if (TrendM1.Calculate())
       {
          LastM1 = bM1;
-         SAnalysisRecord analysis;
-         ResetAnalysisRecord(analysis, "M1_UPDATE");
-         SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-         analysis.values[AC_M1_BAR_TIME] = AnalysisDateTime(iTime(_Symbol, PERIOD_M1, 1));
-         analysis.values[AC_M1_ATR] = AnalysisArrayValue(g_atr, 1, _Digits);
-         analysis.values[AC_M1_BB_UPPER] = AnalysisArrayValue(g_bbUpper, 1, _Digits);
-         analysis.values[AC_M1_BB_MIDDLE] = AnalysisArrayValue(g_bbMiddle, 1, _Digits);
-         analysis.values[AC_M1_BB_LOWER] = AnalysisArrayValue(g_bbLower, 1, _Digits);
-         analysis.values[AC_M1_STOCH_K] = AnalysisArrayValue(g_stochK, 1, 3);
-         analysis.values[AC_M1_STOCH_D] = AnalysisArrayValue(g_stochD, 1, 3);
-         analysis.values[AC_M1_SUPER_TREND] = AnalysisArrayValue(g_superTrend, 1, _Digits);
-         if (ArraySize(g_superTrendDir) > 1)
-            analysis.values[AC_M1_SUPER_TREND_DIRECTION] = AnalysisDirection(g_superTrendDir[1]);
-         WriteAnalysisRecord(analysis);
+         if (EnableAnalysisCsv)
+         {
+            SAnalysisRecord analysis;
+            ResetAnalysisRecord(analysis, "M1_UPDATE");
+            SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
+            analysis.values[AC_M1_BAR_TIME] = AnalysisDateTime(iTime(_Symbol, PERIOD_M1, 1));
+            analysis.values[AC_M1_ATR] = AnalysisArrayValue(g_atr, 1, _Digits);
+            analysis.values[AC_M1_BB_UPPER] = AnalysisArrayValue(g_bbUpper, 1, _Digits);
+            analysis.values[AC_M1_BB_MIDDLE] = AnalysisArrayValue(g_bbMiddle, 1, _Digits);
+            analysis.values[AC_M1_BB_LOWER] = AnalysisArrayValue(g_bbLower, 1, _Digits);
+            analysis.values[AC_M1_STOCH_K] = AnalysisArrayValue(g_stochK, 1, 3);
+            analysis.values[AC_M1_STOCH_D] = AnalysisArrayValue(g_stochD, 1, 3);
+            analysis.values[AC_M1_SUPER_TREND] = AnalysisArrayValue(g_superTrend, 1, _Digits);
+            if (ArraySize(g_superTrendDir) > 1)
+               analysis.values[AC_M1_SUPER_TREND_DIRECTION] = AnalysisDirection(g_superTrendDir[1]);
+            WriteAnalysisRecord(analysis);
+         }
       }
       else
       {
@@ -3871,20 +3997,23 @@ void OnTimer()
          g_TrendTypeH = TrendH1.getType();
          g_TrendStateH = TrendH1.getState();
          g_TrendValueH = TrendH1.getValue();
-         SAnalysisRecord analysis;
-         ResetAnalysisRecord(analysis, "H1_UPDATE");
-         SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
-         analysis.values[AC_H1_BAR_TIME] = AnalysisDateTime(iTime(_Symbol, PERIOD_H1, 1));
-         analysis.values[AC_H1_TREND_TYPE] = EnumToString(g_TrendTypeH);
-         analysis.values[AC_H1_TREND_STATE] = EnumToString(g_TrendStateH);
-         analysis.values[AC_H1_DI_DIRECTION] = AnalysisDirection(g_H1DiDir);
-         analysis.values[AC_H1_EMA_DIRECTION] = AnalysisDirection(g_H1EmaDir);
-         analysis.values[AC_ADX] = AnalysisArrayValue(g_h1_adxArr, 1, 3);
-         analysis.values[AC_DI_PLUS] = AnalysisArrayValue(g_h1_dipArr, 1, 3);
-         analysis.values[AC_DI_MINUS] = AnalysisArrayValue(g_h1_dimArr, 1, 3);
-         analysis.values[AC_EMA_SHORT] = AnalysisArrayValue(g_h1_emaSArr, 1, _Digits);
-         analysis.values[AC_EMA_LONG] = AnalysisArrayValue(g_h1_emaLArr, 1, _Digits);
-         WriteAnalysisRecord(analysis);
+         if (EnableAnalysisCsv)
+         {
+            SAnalysisRecord analysis;
+            ResetAnalysisRecord(analysis, "H1_UPDATE");
+            SetAnalysisContext(analysis, TimeCurrent(), AnalysisCurrentTimeMsc());
+            analysis.values[AC_H1_BAR_TIME] = AnalysisDateTime(iTime(_Symbol, PERIOD_H1, 1));
+            analysis.values[AC_H1_TREND_TYPE] = EnumToString(g_TrendTypeH);
+            analysis.values[AC_H1_TREND_STATE] = EnumToString(g_TrendStateH);
+            analysis.values[AC_H1_DI_DIRECTION] = AnalysisDirection(g_H1DiDir);
+            analysis.values[AC_H1_EMA_DIRECTION] = AnalysisDirection(g_H1EmaDir);
+            analysis.values[AC_ADX] = AnalysisArrayValue(g_h1_adxArr, 1, 3);
+            analysis.values[AC_DI_PLUS] = AnalysisArrayValue(g_h1_dipArr, 1, 3);
+            analysis.values[AC_DI_MINUS] = AnalysisArrayValue(g_h1_dimArr, 1, 3);
+            analysis.values[AC_EMA_SHORT] = AnalysisArrayValue(g_h1_emaSArr, 1, _Digits);
+            analysis.values[AC_EMA_LONG] = AnalysisArrayValue(g_h1_emaLArr, 1, _Digits);
+            WriteAnalysisRecord(analysis);
+         }
          // ADXの取得成功値表示はコメントアウト。
          LastH1 = bH1;
          h1Updated = true;
@@ -3900,29 +4029,32 @@ void OnTimer()
    if (newM1Bar)
    {
       TrendM1.ComputeEntryExit(g_TrendTypeH);
-      SAnalysisRecord buyPrices;
-      ResetAnalysisRecord(buyPrices, "OTHER_ANALYSIS");
-      SetAnalysisContext(buyPrices, TimeCurrent(), AnalysisCurrentTimeMsc());
-      buyPrices.values[AC_REASON] = "OnTimer entry and exit prices";
-      buyPrices.values[AC_DIRECTION] = "BUY";
-      buyPrices.values[AC_ENTRY_PRICE] = AnalysisNumber(g_entryPriceBuy, _Digits);
-      buyPrices.values[AC_PRICE] = AnalysisNumber(g_closePriceBuy, _Digits);
-      buyPrices.values[AC_ENTRY_SIGNAL] = EnumToString(g_lastTrendEntrySignalBuy);
-      buyPrices.values[AC_REASON_DETAIL] = "CanEntry=" + (g_canEntryBuy ? "true" : "false") +
-         ";CanClose=" + (g_canCloseBuy ? "true" : "false");
-      WriteAnalysisRecord(buyPrices);
+      if (EnableAnalysisCsv)
+      {
+         SAnalysisRecord buyPrices;
+         ResetAnalysisRecord(buyPrices, "OTHER_ANALYSIS");
+         SetAnalysisContext(buyPrices, TimeCurrent(), AnalysisCurrentTimeMsc());
+         buyPrices.values[AC_REASON] = "OnTimer entry and exit prices";
+         buyPrices.values[AC_DIRECTION] = "BUY";
+         buyPrices.values[AC_ENTRY_PRICE] = AnalysisNumber(g_entryPriceBuy, _Digits);
+         buyPrices.values[AC_PRICE] = AnalysisNumber(g_closePriceBuy, _Digits);
+         buyPrices.values[AC_ENTRY_SIGNAL] = EnumToString(g_lastTrendEntrySignalBuy);
+         buyPrices.values[AC_REASON_DETAIL] = "CanEntry=" + (g_canEntryBuy ? "true" : "false") +
+            ";CanClose=" + (g_canCloseBuy ? "true" : "false");
+         WriteAnalysisRecord(buyPrices);
 
-      SAnalysisRecord sellPrices;
-      ResetAnalysisRecord(sellPrices, "OTHER_ANALYSIS");
-      SetAnalysisContext(sellPrices, TimeCurrent(), AnalysisCurrentTimeMsc());
-      sellPrices.values[AC_REASON] = "OnTimer entry and exit prices";
-      sellPrices.values[AC_DIRECTION] = "SELL";
-      sellPrices.values[AC_ENTRY_PRICE] = AnalysisNumber(g_entryPriceSell, _Digits);
-      sellPrices.values[AC_PRICE] = AnalysisNumber(g_closePriceSell, _Digits);
-      sellPrices.values[AC_ENTRY_SIGNAL] = EnumToString(g_lastTrendEntrySignalSell);
-      sellPrices.values[AC_REASON_DETAIL] = "CanEntry=" + (g_canEntrySell ? "true" : "false") +
-         ";CanClose=" + (g_canCloseSell ? "true" : "false");
-      WriteAnalysisRecord(sellPrices);
+         SAnalysisRecord sellPrices;
+         ResetAnalysisRecord(sellPrices, "OTHER_ANALYSIS");
+         SetAnalysisContext(sellPrices, TimeCurrent(), AnalysisCurrentTimeMsc());
+         sellPrices.values[AC_REASON] = "OnTimer entry and exit prices";
+         sellPrices.values[AC_DIRECTION] = "SELL";
+         sellPrices.values[AC_ENTRY_PRICE] = AnalysisNumber(g_entryPriceSell, _Digits);
+         sellPrices.values[AC_PRICE] = AnalysisNumber(g_closePriceSell, _Digits);
+         sellPrices.values[AC_ENTRY_SIGNAL] = EnumToString(g_lastTrendEntrySignalSell);
+         sellPrices.values[AC_REASON_DETAIL] = "CanEntry=" + (g_canEntrySell ? "true" : "false") +
+            ";CanClose=" + (g_canCloseSell ? "true" : "false");
+         WriteAnalysisRecord(sellPrices);
+      }
    }
 
    // M15シグナルは、M15確定後に最初に処理したM1足でのみ有効とする。
