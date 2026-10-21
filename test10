@@ -1995,10 +1995,6 @@ public:
       // H1の取得失敗時は、古い相場分類によるBB決済を使わず、M1の共通決済条件だけを残す。
       if (!g_h1AllOk)
       {
-         g_closeBuyOnOrAbove = false;
-         g_closeSellOnOrBelow = false;
-         g_trendBBMiddleCloseBuy = false;
-         g_trendBBMiddleCloseSell = false;
          if (g_m1AllOk && ArraySize(g_bbMiddle) > 1 && IsIndicatorValueValid(g_bbMiddle[1]))
          {
             g_closePriceBuy = g_bbMiddle[1];
