@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.41"
+#property version   "3.42"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -13,21 +13,23 @@ CTrade trade;
 // ===================================================================
 // 定数（コンパイル時定数）
 // ===================================================================
-#define INDICATOR_BARS 25      // 指標・価格系列の共通取得本数
-#define MAX_HISTORY 100        // トレード履歴の最大記録数（100件）
-#define SUPERTREND_INIT_BARS 50 // SuperTrend初期化用のM1履歴本数
-#define ENTRY_SUPPRESS_WEEKEND       1
-#define ENTRY_SUPPRESS_INDICATOR     2
-#define ENTRY_SUPPRESS_TREND_SETTING 4
-#define ENTRY_SUPPRESS_RANGE_SETTING 8
-#define ENTRY_SUPPRESS_H1_DIRECTION  16
-#define ENTRY_SUPPRESS_SAME_M1_CLOSE 32
-#define ENTRY_SUPPRESS_CLOSE_SIGNAL  64
-#define ENTRY_SUPPRESS_SPREAD        128
-#define ENTRY_SUPPRESS_POSITION_CAP  256
-#define ENTRY_SUPPRESS_M15_PYRAMID   512
-#define ENTRY_SUPPRESS_OTHER         1024
-#define ENTRY_SUPPRESS_SEND_FAILURE  2048
+#define INDICATOR_BARS 25        // 指標・価格系列の共通取得本数
+#define MAX_HISTORY 100          // トレード履歴の最大記録数（100件）
+#define SUPERTREND_INIT_BARS 50  // SuperTrend初期化用のM1履歴本数
+
+// CSVにエントリー抑制理由を記述するための処理。各値は2の累乗のビットマスクで、複数の抑制理由は | で組み合わせる。
+#define ENTRY_SUPPRESS_WEEKEND       1    // 週末による新規エントリー禁止
+#define ENTRY_SUPPRESS_INDICATOR     2    // インジケーターが無効または取得不能
+#define ENTRY_SUPPRESS_TREND_SETTING 4    // トレンドエントリー設定による禁止
+#define ENTRY_SUPPRESS_RANGE_SETTING 8    // レンジエントリー設定による禁止
+#define ENTRY_SUPPRESS_H1_DIRECTION  16   // H1方向との不一致または方向判定不能
+#define ENTRY_SUPPRESS_SAME_M1_CLOSE 32   // 同一M1足内での同方向再エントリー抑制
+#define ENTRY_SUPPRESS_CLOSE_SIGNAL  64   // 決済シグナルとの競合による禁止
+#define ENTRY_SUPPRESS_SPREAD        128  // スプレッド上限超過
+#define ENTRY_SUPPRESS_POSITION_CAP  256  // 最大ポジション数による禁止
+#define ENTRY_SUPPRESS_M15_PYRAMID   512  // M15追撃条件による禁止
+#define ENTRY_SUPPRESS_OTHER         1024 // その他のエントリー抑制理由
+#define ENTRY_SUPPRESS_SEND_FAILURE  2048 // 発注・約定処理の失敗
 
 // ===================================================================
 // ユーザー入力
@@ -54,7 +56,7 @@ input int RangeMinProfitPoints      = 5;     // レンジ時の最低利益確�
 input bool EnableEntryOnCloseSignal = true;  // 決済シグナルと新規エントリーシグナルが同時成立した場合にエントリーを許可
 input bool EnableTrendTrading       = true;  // H1トレンド判定時の新規エントリーの許可
 input bool EnableRangeTrading       = true;  // H1レンジ判定時の新規エントリーの許可
-input double atr2MinExtensionSeconds = 0.0; // 2ATR特殊エントリーの時間条件（秒）。今回は0秒で実質常時成立。
+input double atr2MinExtensionSeconds = 0.0;  // 2ATR特殊エントリーの時間条件（秒）。今回は0秒で実質常時成立。
 
 // ===================================================================
 // 内部パラメータ（input にはしない）
@@ -96,15 +98,15 @@ double lot_range = 0.7;             // レンジ相場ロット倍率
 double lot_first_trend = 1.0;       // 初回トレンドエントリー用ロット倍率
 double lot_follow_trend = 0.5;      // 2ポジション目以降のトレンドロット倍率
 
-int initialBreakoutLookback = 20;   // 初動ブレイク判定の過去M1高値/安値参照本数
-double initialBreakoutMinBBATR = 3.0; // 初動ブレイク時の最小BB幅/ATR比率
+int initialBreakoutLookback = 20;      // 初動ブレイク判定の過去M1高値/安値参照本数
+double initialBreakoutMinBBATR = 3.0;  // 初動ブレイク時の最小BB幅/ATR比率
 double initialBreakoutMaxExtensionATR = 2.0; // 初動ブレイク時の過度な伸び許容値
-double g_initialBreakoutHighestHigh = 0.0; // 初動ブレイク判定で使用する過去M1高値の最高値。M1価格データ更新時に存在する範囲から毎回再計算し、OnTickで現在ASKと比較する。
-double g_initialBreakoutLowestLow = 0.0; // 初動ブレイク判定で使用する過去M1安値の最安値。M1価格データ更新時に存在する範囲から毎回再計算し、OnTickで現在BIDと比較する。
-bool g_initialBreakoutPriceReady = false; // 初動ブレイク判定用の最高値・最安値をM1価格配列[2]以降から計算可能な状態かを示す。falseの場合は初動ブレイク判定だけをスキップする。
-int continuationLookback = 10;      // トレンド継続判定の参照本数
-double continuationMinBBATR = 4.0; // トレンド継続時の最小BB幅/ATR比率
-double continuationMinDistanceATR = 0.3; // トレンド継続時のBB中値からの最低距離
+double g_initialBreakoutHighestHigh = 0.0;   // 初動ブレイク判定で使用する過去M1高値の最高値。M1価格データ更新時に存在する範囲から毎回再計算し、OnTickで現在ASKと比較する。
+double g_initialBreakoutLowestLow = 0.0;     // 初動ブレイク判定で使用する過去M1安値の最安値。M1価格データ更新時に存在する範囲から毎回再計算し、OnTickで現在BIDと比較する。
+bool g_initialBreakoutPriceReady = false;    // 初動ブレイク判定用の最高値・最安値をM1価格配列[2]以降から計算可能な状態かを示す。falseの場合は初動ブレイク判定だけをスキップする。
+int continuationLookback = 10;            // トレンド継続判定の参照本数
+double continuationMinBBATR = 4.0;        // トレンド継続時の最小BB幅/ATR比率
+double continuationMinDistanceATR = 0.3;  // トレンド継続時のBB中値からの最低距離
 double continuationMaxExtensionATR = 1.5; // トレンド継続時の過度な伸び許容値
 
 // ===================================================================
@@ -169,11 +171,11 @@ enum TrendState
 //--- ダイバージェンス判定用enum
 enum EntrySignalType
 {
-   ENTRY_SIGNAL_NONE,                 // なし
-   ENTRY_SIGNAL_REACCEL,             // 押し目→再加速
-   ENTRY_SIGNAL_INITIAL_BREAKOUT,    // 初動ブレイク
-   ENTRY_SIGNAL_CONTINUATION,        // トレンド継続
-   ENTRY_SIGNAL_ATR2_EXTENSION       // 2ATR超過連続Tickによる特殊エントリー
+   ENTRY_SIGNAL_NONE,               // なし
+   ENTRY_SIGNAL_REACCEL,            // 押し目→再加速
+   ENTRY_SIGNAL_INITIAL_BREAKOUT,   // 初動ブレイク
+   ENTRY_SIGNAL_CONTINUATION,       // トレンド継続
+   ENTRY_SIGNAL_ATR2_EXTENSION      // 2ATR超過連続Tickによる特殊エントリー
 };
 
 enum DivergenceType
@@ -481,6 +483,9 @@ struct STradeTickContext
 STradeTickContext g_tradeTickHistory[];
 
 int g_analysisFile = INVALID_HANDLE;
+string g_analysisRunId = "";
+string g_currentAnalysisCsvFileName = "";
+string g_initializedAnalysisCsvFiles[];
 long g_nextAtr2EventId = 1;
 SAtr2Event g_atr2BuyEvent;
 SAtr2Event g_atr2SellEvent;
@@ -611,28 +616,78 @@ void SetAnalysisContext(SAnalysisRecord &record, datetime dateTime, long timeMsc
       record.values[AC_M1_SUPER_TREND_DIRECTION] = LogSuperTrendDirection(1);
 }
 
-string GenerateAnalysisCsvFileName()
+bool InitializeAnalysisCsvRunId()
 {
-   datetime now = TimeLocal();
+   datetime localTime = TimeLocal();
    MqlDateTime dateTime;
-   if (!TimeToStruct(now, dateTime))
+   if (localTime <= 0 || !TimeToStruct(localTime, dateTime))
    {
-      PrintFormat("CSVファイル名の日時取得に失敗しました。error=%d", GetLastError());
+      PrintFormat("CSV実行IDのローカル日時取得に失敗しました。error=%d", GetLastError());
+      g_analysisRunId = "";
+      return false;
+   }
+
+   g_analysisRunId = StringFormat("PC%04d%02d%02d_%02d%02d%02d_%u",
+                                  dateTime.year, dateTime.mon, dateTime.day,
+                                  dateTime.hour, dateTime.min, dateTime.sec,
+                                  GetTickCount());
+   g_currentAnalysisCsvFileName = "";
+   if (ArrayResize(g_initializedAnalysisCsvFiles, 0) != 0)
+   {
+      PrintFormat("CSV初期化済み週の管理状態を初期化できません。error=%d", GetLastError());
+      g_analysisRunId = "";
+      return false;
+   }
+   return true;
+}
+
+datetime GetAnalysisWeekStart(datetime recordTime)
+{
+   MqlDateTime dateTime;
+   if (recordTime <= 0 || !TimeToStruct(recordTime, dateTime))
+      return 0;
+
+   dateTime.hour = 0;
+   dateTime.min = 0;
+   dateTime.sec = 0;
+   datetime dayStart = StructToTime(dateTime);
+   if (dayStart <= 0)
+      return 0;
+   return dayStart - (datetime)(dateTime.day_of_week * 86400);
+}
+
+string GenerateAnalysisCsvFileName(datetime weekStart)
+{
+   MqlDateTime dateTime;
+   if (g_analysisRunId == "" || weekStart <= 0 || !TimeToStruct(weekStart, dateTime))
+   {
+      PrintFormat("CSVファイル名の生成に失敗しました。runId=%s weekStart=%s error=%d",
+                  g_analysisRunId, TimeToString(weekStart, TIME_DATE | TIME_SECONDS), GetLastError());
       return "";
    }
 
-   return StringFormat("EA_Analysis_%04d%02d%02d_%02d%02d%02d.csv",
-                       dateTime.year, dateTime.mon, dateTime.day,
+   return StringFormat("EA_Analysis_%s_SERVER%04d%02d%02d_%02d%02d%02d.csv",
+                       g_analysisRunId, dateTime.year, dateTime.mon, dateTime.day,
                        dateTime.hour, dateTime.min, dateTime.sec);
 }
+
+bool OpenAnalysisCsv(datetime recordTime);
 
 bool WriteAnalysisRecord(SAnalysisRecord &record)
 {
    if (!EnableAnalysisCsv)
       return true;
-   if (g_analysisFile == INVALID_HANDLE)
+
+   datetime recordTime = StringToTime(record.values[AC_DATE_TIME]);
+   if (record.values[AC_DATE_TIME] == "" || recordTime <= 0)
    {
-      Print("CSV書き込み失敗：解析CSVファイルが開かれていません。");
+      PrintFormat("CSV書き込み失敗：レコード日時が不正です。RecordType=%s DateTime=%s",
+                  record.values[AC_RECORD_TYPE], record.values[AC_DATE_TIME]);
+      g_analysisWriteFailureCount++;
+      return false;
+   }
+   if (!OpenAnalysisCsv(recordTime))
+   {
       g_analysisWriteFailureCount++;
       return false;
    }
@@ -661,54 +716,119 @@ void WriteOtherAnalysis(const string reason, const string detail, datetime dateT
    WriteAnalysisRecord(analysis);
 }
 
-bool OpenAnalysisCsv()
+bool IsAnalysisCsvInitialized(const string fileName)
+{
+   for (int i = 0; i < ArraySize(g_initializedAnalysisCsvFiles); i++)
+      if (g_initializedAnalysisCsvFiles[i] == fileName)
+         return true;
+   return false;
+}
+
+bool OpenAnalysisCsv(datetime recordTime)
 {
    if (!EnableAnalysisCsv)
-   {
-      g_analysisFile = INVALID_HANDLE;
       return true;
+
+   datetime weekStart = GetAnalysisWeekStart(recordTime);
+   if (weekStart <= 0)
+   {
+      PrintFormat("CSV対象週の算出に失敗しました。recordTime=%s error=%d",
+                  TimeToString(recordTime, TIME_DATE | TIME_SECONDS), GetLastError());
+      return false;
    }
 
-   string csvFileName = GenerateAnalysisCsvFileName();
+   string csvFileName = GenerateAnalysisCsvFileName(weekStart);
    if (csvFileName == "")
       return false;
 
-   g_analysisFile = FileOpen(csvFileName, FILE_WRITE | FILE_TXT | FILE_ANSI, '\t', CP_UTF8);
+   if (g_analysisFile != INVALID_HANDLE && g_currentAnalysisCsvFileName == csvFileName)
+      return true;
+
+   if (g_analysisFile != INVALID_HANDLE)
+   {
+      FileFlush(g_analysisFile);
+      FileClose(g_analysisFile);
+      g_analysisFile = INVALID_HANDLE;
+      g_currentAnalysisCsvFileName = "";
+   }
+
+   bool initializedThisRun = IsAnalysisCsvInitialized(csvFileName);
+   if (initializedThisRun)
+   {
+      g_analysisFile = FileOpen(csvFileName, FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI, '\t', CP_UTF8);
+   }
+   else
+   {
+      if (FileIsExist(csvFileName) && !FileDelete(csvFileName))
+      {
+         PrintFormat("新規CSV作成前に既存ファイルを削除できません：%s error=%d",
+                     csvFileName, GetLastError());
+         return false;
+      }
+      g_analysisFile = FileOpen(csvFileName, FILE_WRITE | FILE_TXT | FILE_ANSI, '\t', CP_UTF8);
+   }
+
    if (g_analysisFile == INVALID_HANDLE)
    {
       PrintFormat("CSVファイルを開けません：%s error=%d", csvFileName, GetLastError());
       return false;
    }
 
-   ResetLastError();
-   string headers[AC_COUNT] =
+   if (initializedThisRun)
    {
-      "RecordType", "DateTime", "TimeMsc", "Symbol", "Direction", "Price", "ExitPrice", "Bid", "Ask",
-      "SpreadPoints", "Lot", "Ticket", "Order", "Deal", "Position", "Reason", "H1BarTime",
-      "H1TrendType", "H1TrendState", "H1DIDirection", "H1EMADirection", "ADX", "DIPlus",
-      "DIMinus", "EMAShort", "EMALong", "M15BarTime", "M15RSI", "M15MACDMain",
-      "M15MACDSignal", "M15MACDHistogram", "M15MACDCross", "M1BarTime", "M1Open", "M1High",
-      "M1Low", "M1Close", "M1TickVolume", "M1BBUpper", "M1BBMiddle", "M1BBLower",
-      "M1StochK", "M1StochD", "M1ATR", "M1SuperTrend", "M1SuperTrendDirection", "EntrySignal",
-      "CloseStochastic", "CloseTrendBBMiddle", "EntryPrice", "SL", "TP", "ElapsedSeconds",
-      "SameDirectionCount", "LotCalculation", "Balance", "Equity", "FreeMargin", "RequiredMargin",
-      "ReasonDetail", "ATR2Boundary", "ATR2Extension", "ATR2TickIndex", "ATR2ElapsedMs",
-      "ATR2EventId", "ATR2InsideBoundary", "EntryExecuted", "TradeTickRecordType",
-      "TradeTickEventId", "TradeTickRelativeIndex", "TradeTickTimeMsc", "TradeTickBid",
-      "TradeTickAsk", "TradeTickSpreadPoints", "TradeTickM1BarTime", "TradeTickATR",
-      "TradeTickBBMiddle", "TradeTickSuperTrend", "TradeTickDirection", "MagicNumber",
-      "Retcode", "Comment", "PriceDifference", "RequestedPrice", "ExecutionPrice", "DealReason",
-      "DealProfit", "DealCommission", "DealSwap", "DealFee"
-   };
-   uint written = FileWriteString(g_analysisFile, BuildAnalysisCsvLine(headers));
-   if (written == 0)
-   {
-      PrintFormat("CSVヘッダー書き込み失敗：%s error=%d", csvFileName, GetLastError());
-      g_analysisWriteFailureCount++;
-      FileClose(g_analysisFile);
-      g_analysisFile = INVALID_HANDLE;
-      return false;
+      ResetLastError();
+      if (!FileSeek(g_analysisFile, 0, SEEK_END))
+      {
+         PrintFormat("CSV追記位置への移動に失敗しました：%s error=%d", csvFileName, GetLastError());
+         FileClose(g_analysisFile);
+         g_analysisFile = INVALID_HANDLE;
+         return false;
+      }
    }
+   else
+   {
+      ResetLastError();
+      string headers[AC_COUNT] =
+      {
+         "RecordType", "DateTime", "TimeMsc", "Symbol", "Direction", "Price", "ExitPrice", "Bid", "Ask",
+         "SpreadPoints", "Lot", "Ticket", "Order", "Deal", "Position", "Reason", "H1BarTime",
+         "H1TrendType", "H1TrendState", "H1DIDirection", "H1EMADirection", "ADX", "DIPlus",
+         "DIMinus", "EMAShort", "EMALong", "M15BarTime", "M15RSI", "M15MACDMain",
+         "M15MACDSignal", "M15MACDHistogram", "M15MACDCross", "M1BarTime", "M1Open", "M1High",
+         "M1Low", "M1Close", "M1TickVolume", "M1BBUpper", "M1BBMiddle", "M1BBLower",
+         "M1StochK", "M1StochD", "M1ATR", "M1SuperTrend", "M1SuperTrendDirection", "EntrySignal",
+         "CloseStochastic", "CloseTrendBBMiddle", "EntryPrice", "SL", "TP", "ElapsedSeconds",
+         "SameDirectionCount", "LotCalculation", "Balance", "Equity", "FreeMargin", "RequiredMargin",
+         "ReasonDetail", "ATR2Boundary", "ATR2Extension", "ATR2TickIndex", "ATR2ElapsedMs",
+         "ATR2EventId", "ATR2InsideBoundary", "EntryExecuted", "TradeTickRecordType",
+         "TradeTickEventId", "TradeTickRelativeIndex", "TradeTickTimeMsc", "TradeTickBid",
+         "TradeTickAsk", "TradeTickSpreadPoints", "TradeTickM1BarTime", "TradeTickATR",
+         "TradeTickBBMiddle", "TradeTickSuperTrend", "TradeTickDirection", "MagicNumber",
+         "Retcode", "Comment", "PriceDifference", "RequestedPrice", "ExecutionPrice", "DealReason",
+         "DealProfit", "DealCommission", "DealSwap", "DealFee"
+      };
+      uint written = FileWriteString(g_analysisFile, BuildAnalysisCsvLine(headers));
+      if (written == 0)
+      {
+         PrintFormat("CSVヘッダー書き込み失敗：%s error=%d", csvFileName, GetLastError());
+         g_analysisWriteFailureCount++;
+         FileClose(g_analysisFile);
+         g_analysisFile = INVALID_HANDLE;
+         return false;
+      }
+
+      int initializedCount = ArraySize(g_initializedAnalysisCsvFiles);
+      if (ArrayResize(g_initializedAnalysisCsvFiles, initializedCount + 1) != initializedCount + 1)
+      {
+         PrintFormat("CSV初期化済み週の管理に失敗しました：%s error=%d", csvFileName, GetLastError());
+         FileClose(g_analysisFile);
+         g_analysisFile = INVALID_HANDLE;
+         return false;
+      }
+      g_initializedAnalysisCsvFiles[initializedCount] = csvFileName;
+   }
+
+   g_currentAnalysisCsvFileName = csvFileName;
    return true;
 }
 
@@ -2786,7 +2906,14 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   OpenAnalysisCsv();
+   if (EnableAnalysisCsv)
+      InitializeAnalysisCsvRunId();
+   else
+   {
+      g_analysisFile = INVALID_HANDLE;
+      g_currentAnalysisCsvFileName = "";
+      ArrayResize(g_initializedAnalysisCsvFiles, 0);
+   }
 
    if (EnableAnalysisCsv)
       g_nextAtr2EventId = 1;
@@ -2918,7 +3045,7 @@ void OnDeinit(const int reason)
       PrintFormat("未処理の取引Dealイベントが終了時に残っています。件数=%d", ArraySize(g_pendingTradeEvents));
    if (EnableAnalysisCsv && (g_pendingAtr2BuyRecordValid || g_pendingAtr2SellRecordValid))
       Print("未書き込みのATR2レコードが終了時に残っています。");
-   if (g_analysisFile != INVALID_HANDLE)
+   if (EnableAnalysisCsv)
    {
       SAnalysisRecord endAnalysis;
       ResetAnalysisRecord(endAnalysis, "OTHER_ANALYSIS");
@@ -2942,7 +3069,7 @@ void OnDeinit(const int reason)
 
    EventKillTimer();
    Comment("");
-   if (g_analysisFile != INVALID_HANDLE)
+   if (EnableAnalysisCsv)
    {
       SAnalysisRecord positionAnalysis;
       ResetAnalysisRecord(positionAnalysis, "POSITION_SUMMARY");
@@ -2951,9 +3078,13 @@ void OnDeinit(const int reason)
       positionAnalysis.values[AC_SAME_DIRECTION_COUNT] = IntegerToString(PositionsTotal());
       WriteAnalysisRecord(positionAnalysis);
       FlushTradeTickHistoryToCsv("DEINIT", 0);
+   }
+   if (g_analysisFile != INVALID_HANDLE)
+   {
       FileFlush(g_analysisFile);
       FileClose(g_analysisFile);
       g_analysisFile = INVALID_HANDLE;
+      g_currentAnalysisCsvFileName = "";
    }
    if (EnableAnalysisCsv)
       PrintFormat("解析CSV書き込み件数：成功=%I64d 失敗=%I64d 未処理Deal=%d ATR2保留=%s",
