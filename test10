@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.42"
+#property version   "3.43"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -350,7 +350,7 @@ struct STradeRequestRecord
    RequestEvaluation evaluation;
    uint retcode;
 };
-STradeRequestRecord g_requestRecords[]; // 古い順の直近60秒リクエスト履歴
+STradeRequestRecord g_requestRecords[]; // 古い順の直近リクエスト履歴
 datetime TradeHistory[MAX_HISTORY]; // トレード履歴配列
 int TradeHistorySize = 0;           // トレード履歴サイズ
 ulong StartTimeGlobal = 0;          // EA開始時刻（グローバル）
@@ -486,6 +486,9 @@ int g_analysisFile = INVALID_HANDLE;
 string g_analysisRunId = "";
 string g_currentAnalysisCsvFileName = "";
 string g_initializedAnalysisCsvFiles[];
+int g_requestCsvFile = INVALID_HANDLE;
+string g_requestCsvFileName = "";
+bool g_requestCsvInitializedThisRun = false;
 long g_nextAtr2EventId = 1;
 SAtr2Event g_atr2BuyEvent;
 SAtr2Event g_atr2SellEvent;
@@ -1199,25 +1202,122 @@ void ResetM1Data()
    g_m1_bb_ok = false; g_m1_stoch_ok = false; g_m1_atr_ok = false;
    g_m1AllOk = false;
 }
-int requestLogThreshold = 20;      // 直近60秒のログ表示閾値
+int requestLogWindowSeconds = 65;
+int requestLogThreshold = 20;
 
 int RequestLimitCount()
 {
    return requestLogThreshold;
 }
 
+string RequestEvaluationToString(RequestEvaluation evaluation)
+{
+   if (evaluation == REQUEST_SEND_FAILED)
+      return "SEND_FAILED";
+   if (evaluation == REQUEST_EXECUTION_FAILED)
+      return "EXECUTION_FAILED";
+   return "SUCCEEDED";
+}
+
+string GenerateRequestCsvFileName()
+{
+   if (g_analysisRunId == "")
+   {
+      Print("リクエスト履歴CSVファイル名の生成に失敗しました。実行IDがありません。");
+      return "";
+   }
+   return "EA_Requests_" + g_analysisRunId + ".csv";
+}
+
+bool OpenRequestCsv()
+{
+   if (g_requestCsvFile != INVALID_HANDLE)
+      return true;
+
+   if (g_requestCsvFileName == "")
+      g_requestCsvFileName = GenerateRequestCsvFileName();
+   if (g_requestCsvFileName == "")
+      return false;
+
+   if (g_requestCsvInitializedThisRun)
+   {
+      g_requestCsvFile = FileOpen(g_requestCsvFileName,
+                                  FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI, ',', CP_UTF8);
+   }
+   else
+   {
+      g_requestCsvFile = FileOpen(g_requestCsvFileName,
+                                  FILE_WRITE | FILE_CSV | FILE_ANSI, ',', CP_UTF8);
+   }
+
+   if (g_requestCsvFile == INVALID_HANDLE)
+   {
+      PrintFormat("リクエスト履歴CSVを開けません：%s error=%d",
+                  g_requestCsvFileName, GetLastError());
+      return false;
+   }
+
+   if (g_requestCsvInitializedThisRun)
+   {
+      ResetLastError();
+      if (!FileSeek(g_requestCsvFile, 0, SEEK_END))
+      {
+         PrintFormat("リクエスト履歴CSVの追記位置への移動に失敗しました：%s error=%d",
+                     g_requestCsvFileName, GetLastError());
+         FileClose(g_requestCsvFile);
+         g_requestCsvFile = INVALID_HANDLE;
+         return false;
+      }
+      return true;
+   }
+
+   ResetLastError();
+   if (FileWrite(g_requestCsvFile, "ServerTime", "RequestType", "Result", "Retcode") == 0)
+   {
+      PrintFormat("リクエスト履歴CSVのヘッダー書き込みに失敗しました：%s error=%d",
+                  g_requestCsvFileName, GetLastError());
+      FileClose(g_requestCsvFile);
+      g_requestCsvFile = INVALID_HANDLE;
+      return false;
+   }
+   FileFlush(g_requestCsvFile);
+   g_requestCsvInitializedThisRun = true;
+   return true;
+}
+
+void WriteRequestCsvRecord(datetime requestTime, const string requestType,
+                           RequestEvaluation evaluation, uint retcode)
+{
+   if (!OpenRequestCsv())
+      return;
+
+   ResetLastError();
+   if (FileWrite(g_requestCsvFile, TimeToString(requestTime, TIME_DATE | TIME_SECONDS),
+                 requestType, RequestEvaluationToString(evaluation), retcode) == 0)
+   {
+      PrintFormat("リクエスト履歴CSVの書き込みに失敗しました：%s error=%d",
+                  g_requestCsvFileName, GetLastError());
+      FileClose(g_requestCsvFile);
+      g_requestCsvFile = INVALID_HANDLE;
+      return;
+   }
+   FileFlush(g_requestCsvFile);
+}
+
 void PruneRequestRecords(ulong nowMsc)
 {
-   int firstValid = 0;
    int total = ArraySize(g_requestRecords);
-   while (firstValid < total && nowMsc - g_requestRecords[firstValid].requestTimeMsc >= 60000)
-      firstValid++;
-   if (firstValid > 0)
+   int validCount = 0;
+   for (int i = 0; i < total; i++)
    {
-      for (int i = firstValid; i < total; i++)
-         g_requestRecords[i - firstValid] = g_requestRecords[i];
-      ArrayResize(g_requestRecords, total - firstValid);
+      if (nowMsc - g_requestRecords[i].requestTimeMsc >= (ulong)requestLogWindowSeconds * 1000)
+         continue;
+      if (validCount != i)
+         g_requestRecords[validCount] = g_requestRecords[i];
+      validCount++;
    }
+   if (validCount < total)
+      ArrayResize(g_requestRecords, validCount);
 }
 
 int RequestEvaluationCount(RequestEvaluation evaluation)
@@ -1229,12 +1329,16 @@ int RequestEvaluationCount(RequestEvaluation evaluation)
    return count;
 }
 
-void RecordRequest(const string requestType, RequestEvaluation evaluation, uint retcode, ulong requestTimeMsc)
+void RecordRequest(const string requestType, RequestEvaluation evaluation, uint retcode,
+                   ulong requestTimeMsc, datetime requestTime)
 {
+   WriteRequestCsvRecord(requestTime, requestType, evaluation, retcode);
+
    ulong nowMsc = GetTickCount64();
    PruneRequestRecords(nowMsc);
-   if (nowMsc - requestTimeMsc >= 60000)
+   if (nowMsc - requestTimeMsc >= (ulong)requestLogWindowSeconds * 1000)
       return;
+
    int index = ArraySize(g_requestRecords);
    if (ArrayResize(g_requestRecords, index + 1) != index + 1)
    {
@@ -1242,16 +1346,15 @@ void RecordRequest(const string requestType, RequestEvaluation evaluation, uint 
                   requestType, retcode, GetLastError());
       return;
    }
-   g_requestRecords[index].requestTimeMsc = nowMsc;
+   g_requestRecords[index].requestTimeMsc = requestTimeMsc;
    g_requestRecords[index].evaluation = evaluation;
    g_requestRecords[index].retcode = retcode;
    int count = ArraySize(g_requestRecords);
    if (count > RequestLimitCount())
    {
-      string outcome = evaluation == REQUEST_SEND_FAILED ? "SEND_FAILED" :
-         (evaluation == REQUEST_EXECUTION_FAILED ? "EXECUTION_FAILED" : "SUCCEEDED");
-      PrintFormat("取引リクエスト頻度警告 時刻=%s 直近60秒=%d 種別=%s 結果=%s retcode=%u 成功=%d 実行失敗=%d 送信失敗=%d",
-                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS), count, requestType, outcome, retcode,
+      PrintFormat("取引リクエスト頻度警告 時刻=%s 直近%d秒=%d 種別=%s 結果=%s retcode=%u 成功=%d 実行失敗=%d 送信失敗=%d",
+                  TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), requestLogWindowSeconds,
+                  count, requestType, RequestEvaluationToString(evaluation), retcode,
                   RequestEvaluationCount(REQUEST_EXECUTION_SUCCEEDED),
                   RequestEvaluationCount(REQUEST_EXECUTION_FAILED),
                   RequestEvaluationCount(REQUEST_SEND_FAILED));
@@ -2350,12 +2453,13 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp, 
    req.tp = tp;
    req.type = type;
    ulong requestTimeMsc = GetTickCount64();
+   datetime requestTime = TimeCurrent();
    bool sent = OrderSend(req, res);
    RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
       ((res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
        ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
    RecordRequest(type == ORDER_TYPE_BUY ? "新規BUY発注" : "新規SELL発注",
-                 evaluation, res.retcode, requestTimeMsc);
+                 evaluation, res.retcode, requestTimeMsc, requestTime);
    if (!sent)
    {
       PrintFormat("発注失敗 type=%s price=%.5f lot=%.2f SL=%.5f TP=%.5f spread=%.1f magic=%I64d retcode=%d comment=%s err=%d", type == ORDER_TYPE_BUY ? "BUY" : "SELL", requestedPrice, volume, sl, tp, spreadPts, MagicNumber, res.retcode, res.comment, GetLastError());
@@ -2453,12 +2557,13 @@ bool ClosePositionByTicket(ulong ticket, const string reason)
    req.price = requestedPrice;
    req.type = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    ulong requestTimeMsc = GetTickCount64();
+   datetime requestTime = TimeCurrent();
    bool sent = OrderSend(req, res);
    RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
       ((res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
        ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
    RecordRequest(ptype == POSITION_TYPE_BUY ? "BUYポジション決済" : "SELLポジション決済",
-                 evaluation, res.retcode, requestTimeMsc);
+                 evaluation, res.retcode, requestTimeMsc, requestTime);
    if (!sent)
    {
       PrintFormat("決済失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
@@ -2546,11 +2651,12 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
    double currentSL = PositionGetDouble(POSITION_SL);
    double currentPrice = ptype == POSITION_TYPE_BUY ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    ulong requestTimeMsc = GetTickCount64();
+   datetime requestTime = TimeCurrent();
    bool sent = trade.PositionModify(ticket, newSL, newTP);
    uint retcode = trade.ResultRetcode();
    RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
       (retcode == TRADE_RETCODE_DONE ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
-   RecordRequest("ポジションSL/TP変更", evaluation, retcode, requestTimeMsc);
+   RecordRequest("ポジションSL/TP変更", evaluation, retcode, requestTimeMsc, requestTime);
    if (!sent)
    {
       PrintFormat("SL更新失敗 ticket=%I64u type=%s currentSL=%.5f newSL=%.5f price=%.5f retcode=%d comment=%s err=%d", ticket, ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", currentSL, newSL, currentPrice, retcode, trade.ResultComment(), GetLastError());
@@ -2906,14 +3012,15 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if (EnableAnalysisCsv)
-      InitializeAnalysisCsvRunId();
-   else
+   bool runIdInitialized = InitializeAnalysisCsvRunId();
+   if (!EnableAnalysisCsv)
    {
       g_analysisFile = INVALID_HANDLE;
       g_currentAnalysisCsvFileName = "";
       ArrayResize(g_initializedAnalysisCsvFiles, 0);
    }
+   if (runIdInitialized)
+      OpenRequestCsv();
 
    if (EnableAnalysisCsv)
       g_nextAtr2EventId = 1;
@@ -3085,6 +3192,12 @@ void OnDeinit(const int reason)
       FileClose(g_analysisFile);
       g_analysisFile = INVALID_HANDLE;
       g_currentAnalysisCsvFileName = "";
+   }
+   if (g_requestCsvFile != INVALID_HANDLE)
+   {
+      FileFlush(g_requestCsvFile);
+      FileClose(g_requestCsvFile);
+      g_requestCsvFile = INVALID_HANDLE;
    }
    if (EnableAnalysisCsv)
       PrintFormat("解析CSV書き込み件数：成功=%I64d 失敗=%I64d 未処理Deal=%d ATR2保留=%s",
@@ -3674,7 +3787,7 @@ void OnTick()
    UpdateTrailingStops();
 
    // 決済後にスプレッド閾値チェック（スプレッドが大きければエントリを中止）
-   if (spreadPts >= MaxAllowedSpread)
+   if (spreadPts > MaxAllowedSpread)
    {
       // PrintFormat("スプレッドが閾値を超えたため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント 閾値=%dポイント",
       //             ASK, BID, spreadPts, MaxAllowedSpread);
