@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.43"
+#property version   "3.44"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -62,10 +62,13 @@ input double atr2MinExtensionSeconds = 0.0;  // 2ATR特殊エントリーの時�
 // 内部パラメータ（input にはしない）
 // ===================================================================
 bool EnableAnalysisCsv = true;      // 解析用CSVの出力。無効化する場合はコード上でfalseにする。
+int requestLogWindowSeconds = 65;   // リクエスト頻度を集計する直近の時間幅（秒）
+int requestLogThreshold = 20;       // リクエスト頻度の警告閾値。この件数を超えた場合に警告する
 int maxPositionsNormal = 1;         // 通常時の同一方向最大ポジション数
 int maxPositionsPyramid = 3;        // 追撃を含めた同一方向の最終最大ポジション数
 int NewEntryStopBeforeClose = 3 * 60 * 60; // 週末取引終了前の新規発注停止時間（秒）
 int ForceCloseBeforeClose = 10 * 60;       // 週末取引終了前の強制決済開始時間（秒）
+int tradeTickHistorySize = 50;      // 取引前後Tick記録用のリングバッファサイズ
 
 int adxPeriod = 14;                 // ADX周期
 int adxThreshold = 25;              // ADX弱トレンド判定閾値
@@ -346,7 +349,7 @@ enum RequestEvaluation
 };
 struct STradeRequestRecord
 {
-   ulong requestTimeMsc;
+   datetime requestTime;
    RequestEvaluation evaluation;
    uint retcode;
 };
@@ -497,7 +500,6 @@ SAnalysisRecord g_pendingAtr2SellRecord;
 bool g_pendingAtr2BuyRecordValid = false;
 bool g_pendingAtr2SellRecordValid = false;
 long g_currentAtr2TickTimeMsc = 0;
-int tradeTickHistorySize = 50;  // 取引前後Tick記録用のリングバッファサイズ
 int g_tradeTickWritePos = 0;
 int g_tradeTickCount = 0;
 
@@ -1202,14 +1204,6 @@ void ResetM1Data()
    g_m1_bb_ok = false; g_m1_stoch_ok = false; g_m1_atr_ok = false;
    g_m1AllOk = false;
 }
-int requestLogWindowSeconds = 65;
-int requestLogThreshold = 20;
-
-int RequestLimitCount()
-{
-   return requestLogThreshold;
-}
-
 string RequestEvaluationToString(RequestEvaluation evaluation)
 {
    if (evaluation == REQUEST_SEND_FAILED)
@@ -1304,13 +1298,14 @@ void WriteRequestCsvRecord(datetime requestTime, const string requestType,
    FileFlush(g_requestCsvFile);
 }
 
-void PruneRequestRecords(ulong nowMsc)
+void PruneRequestRecords(datetime nowTime)
 {
    int total = ArraySize(g_requestRecords);
    int validCount = 0;
    for (int i = 0; i < total; i++)
    {
-      if (nowMsc - g_requestRecords[i].requestTimeMsc >= (ulong)requestLogWindowSeconds * 1000)
+      long ageSeconds = (long)(nowTime - g_requestRecords[i].requestTime);
+      if (ageSeconds < 0 || ageSeconds >= requestLogWindowSeconds)
          continue;
       if (validCount != i)
          g_requestRecords[validCount] = g_requestRecords[i];
@@ -1330,14 +1325,11 @@ int RequestEvaluationCount(RequestEvaluation evaluation)
 }
 
 void RecordRequest(const string requestType, RequestEvaluation evaluation, uint retcode,
-                   ulong requestTimeMsc, datetime requestTime)
+                   datetime requestTime)
 {
    WriteRequestCsvRecord(requestTime, requestType, evaluation, retcode);
 
-   ulong nowMsc = GetTickCount64();
-   PruneRequestRecords(nowMsc);
-   if (nowMsc - requestTimeMsc >= (ulong)requestLogWindowSeconds * 1000)
-      return;
+   PruneRequestRecords(requestTime);
 
    int index = ArraySize(g_requestRecords);
    if (ArrayResize(g_requestRecords, index + 1) != index + 1)
@@ -1346,14 +1338,14 @@ void RecordRequest(const string requestType, RequestEvaluation evaluation, uint 
                   requestType, retcode, GetLastError());
       return;
    }
-   g_requestRecords[index].requestTimeMsc = requestTimeMsc;
+   g_requestRecords[index].requestTime = requestTime;
    g_requestRecords[index].evaluation = evaluation;
    g_requestRecords[index].retcode = retcode;
    int count = ArraySize(g_requestRecords);
-   if (count > RequestLimitCount())
+   if (count > requestLogThreshold)
    {
       PrintFormat("取引リクエスト頻度警告 時刻=%s 直近%d秒=%d 種別=%s 結果=%s retcode=%u 成功=%d 実行失敗=%d 送信失敗=%d",
-                  TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), requestLogWindowSeconds,
+                  TimeToString(requestTime, TIME_DATE | TIME_SECONDS), requestLogWindowSeconds,
                   count, requestType, RequestEvaluationToString(evaluation), retcode,
                   RequestEvaluationCount(REQUEST_EXECUTION_SUCCEEDED),
                   RequestEvaluationCount(REQUEST_EXECUTION_FAILED),
@@ -2452,14 +2444,13 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp, 
    req.sl = sl;
    req.tp = tp;
    req.type = type;
-   ulong requestTimeMsc = GetTickCount64();
    datetime requestTime = TimeCurrent();
    bool sent = OrderSend(req, res);
    RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
       ((res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
        ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
    RecordRequest(type == ORDER_TYPE_BUY ? "新規BUY発注" : "新規SELL発注",
-                 evaluation, res.retcode, requestTimeMsc, requestTime);
+                 evaluation, res.retcode, requestTime);
    if (!sent)
    {
       PrintFormat("発注失敗 type=%s price=%.5f lot=%.2f SL=%.5f TP=%.5f spread=%.1f magic=%I64d retcode=%d comment=%s err=%d", type == ORDER_TYPE_BUY ? "BUY" : "SELL", requestedPrice, volume, sl, tp, spreadPts, MagicNumber, res.retcode, res.comment, GetLastError());
@@ -2556,14 +2547,13 @@ bool ClosePositionByTicket(ulong ticket, const string reason)
    req.magic = MagicNumber;
    req.price = requestedPrice;
    req.type = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-   ulong requestTimeMsc = GetTickCount64();
    datetime requestTime = TimeCurrent();
    bool sent = OrderSend(req, res);
    RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
       ((res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
        ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
    RecordRequest(ptype == POSITION_TYPE_BUY ? "BUYポジション決済" : "SELLポジション決済",
-                 evaluation, res.retcode, requestTimeMsc, requestTime);
+                 evaluation, res.retcode, requestTime);
    if (!sent)
    {
       PrintFormat("決済失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
@@ -2650,13 +2640,12 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
    long ptype = PositionGetInteger(POSITION_TYPE);
    double currentSL = PositionGetDouble(POSITION_SL);
    double currentPrice = ptype == POSITION_TYPE_BUY ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   ulong requestTimeMsc = GetTickCount64();
    datetime requestTime = TimeCurrent();
    bool sent = trade.PositionModify(ticket, newSL, newTP);
    uint retcode = trade.ResultRetcode();
    RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
       (retcode == TRADE_RETCODE_DONE ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
-   RecordRequest("ポジションSL/TP変更", evaluation, retcode, requestTimeMsc, requestTime);
+   RecordRequest("ポジションSL/TP変更", evaluation, retcode, requestTime);
    if (!sent)
    {
       PrintFormat("SL更新失敗 ticket=%I64u type=%s currentSL=%.5f newSL=%.5f price=%.5f retcode=%d comment=%s err=%d", ticket, ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", currentSL, newSL, currentPrice, retcode, trade.ResultComment(), GetLastError());
