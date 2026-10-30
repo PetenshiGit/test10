@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.44"
+#property version   "3.45"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -68,6 +68,7 @@ int maxPositionsNormal = 1;         // 通常時の同一方向最大ポジシ�
 int maxPositionsPyramid = 3;        // 追撃を含めた同一方向の最終最大ポジション数
 int NewEntryStopBeforeClose = 3 * 60 * 60; // 週末取引終了前の新規発注停止時間（秒）
 int ForceCloseBeforeClose = 10 * 60;       // 週末取引終了前の強制決済開始時間（秒）
+int WeekendForceCloseRetrySeconds = 10;    // 週末強制決済の再試行間隔（秒）
 int tradeTickHistorySize = 50;      // 取引前後Tick記録用のリングバッファサイズ
 
 int adxPeriod = 14;                 // ADX周期
@@ -329,7 +330,6 @@ int g_entrySuppressionMaskBuy = 0;
 int g_entrySuppressionMaskSell = 0;
 int ProcessPendingTradeEvents();
 
-bool g_weekendEntryStopped = false;
 bool g_weekendForceCloseActive = false;
 bool g_weekendTargetValid = false;
 bool g_weekendScheduleInitialized = false;
@@ -337,6 +337,7 @@ datetime g_weekendSessionEnd = 0;
 datetime g_weekendNextSessionStart = 0;
 datetime g_weekendEntryStopTime = 0;
 datetime g_weekendForceCloseTime = 0;
+datetime g_weekendForceCloseLastAttempt = 0;
 
 // ===================================================================
 // 取引リクエスト履歴
@@ -2522,7 +2523,7 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp, 
 // ===================================================================
 // ポジションの決済と逆指値更新の補助関数
 // ===================================================================
-bool ClosePositionByTicket(ulong ticket, const string reason)
+bool ClosePositionByTicket(ulong ticket, const string reason, bool weekendForceClose = false)
 {
    if (!PositionSelectByTicket(ticket))
       return (false);
@@ -2547,22 +2548,39 @@ bool ClosePositionByTicket(ulong ticket, const string reason)
    req.magic = MagicNumber;
    req.price = requestedPrice;
    req.type = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-   datetime requestTime = TimeCurrent();
+   datetime requestTime = weekendForceClose ? TimeTradeServer() : TimeCurrent();
+   if (weekendForceClose)
+      ResetLastError();
    bool sent = OrderSend(req, res);
+   int lastError = weekendForceClose ? GetLastError() : 0;
    RequestEvaluation evaluation = !sent ? REQUEST_SEND_FAILED :
       ((res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
        ? REQUEST_EXECUTION_SUCCEEDED : REQUEST_EXECUTION_FAILED);
    RecordRequest(ptype == POSITION_TYPE_BUY ? "BUYポジション決済" : "SELLポジション決済",
                  evaluation, res.retcode, requestTime);
-   if (!sent)
+   if (!sent || (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL))
    {
-      PrintFormat("決済失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
+      if (weekendForceClose)
+      {
+         if (EnableAnalysisCsv)
+         {
+            SAnalysisRecord analysis;
+            ResetAnalysisRecord(analysis, "WEEKEND");
+            SetAnalysisContext(analysis, requestTime, (long)requestTime * 1000);
+            analysis.values[AC_DIRECTION] = ptype == POSITION_TYPE_BUY ? "BUY" : "SELL";
+            analysis.values[AC_TICKET] = AnalysisLong((long)ticket);
+            analysis.values[AC_REASON] = "Force close failed";
+            analysis.values[AC_REASON_DETAIL] = "Success=false;GetLastError=" + IntegerToString(lastError);
+            analysis.values[AC_RETCODE] = IntegerToString((int)res.retcode);
+            analysis.values[AC_COMMENT] = res.comment;
+            WriteAnalysisRecord(analysis);
+         }
+      }
+      else if (!sent)
+         PrintFormat("決済失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
+      else
+         PrintFormat("決済実行失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
       return (false);
-   }
-   if (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL)
-   {
-      PrintFormat("決済実行失敗 type=%s ticket=%I64u entry=%.5f price=%.5f lot=%.2f spread=%.1f reason=%s retcode=%d comment=%s err=%d", ptype == POSITION_TYPE_BUY ? "BUY" : "SELL", ticket, openPrice, requestedPrice, vol, spreadPts, reason, res.retcode, res.comment, GetLastError());
-      return false;
    }
    if (EnableAnalysisCsv)
    {
@@ -2921,8 +2939,13 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
    if (g_weekendTargetValid && now >= g_weekendNextSessionStart)
    {
       g_weekendTargetValid = false;
-      g_weekendEntryStopped = false;
       g_weekendForceCloseActive = false;
+      g_weekendForceCloseLastAttempt = 0;
+      g_weekendScheduleInitialized = false;
+      g_weekendSessionEnd = 0;
+      g_weekendNextSessionStart = 0;
+      g_weekendEntryStopTime = 0;
+      g_weekendForceCloseTime = 0;
       if (EnableAnalysisCsv)
       {
          SAnalysisRecord analysis;
@@ -2940,9 +2963,9 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
    if (!g_weekendTargetValid)
       return;
 
-   if (now >= g_weekendEntryStopTime && !g_weekendEntryStopped)
+   if (now >= g_weekendEntryStopTime && !g_weekendForceCloseActive)
    {
-      g_weekendEntryStopped = true;
+      g_weekendForceCloseActive = true;
       if (EnableAnalysisCsv)
       {
          SAnalysisRecord analysis;
@@ -2952,45 +2975,59 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
          WriteAnalysisRecord(analysis);
       }
    }
-   if (now >= g_weekendForceCloseTime && !g_weekendForceCloseActive)
+
+   if (!g_weekendForceCloseActive || now < g_weekendForceCloseTime)
+      return;
+   if (g_weekendForceCloseLastAttempt > 0 &&
+       (long)(now - g_weekendForceCloseLastAttempt) < WeekendForceCloseRetrySeconds)
+      return;
+
+   if (g_weekendForceCloseLastAttempt == 0 && EnableAnalysisCsv)
    {
-      g_weekendEntryStopped = true;
-      g_weekendForceCloseActive = true;
-      if (EnableAnalysisCsv)
+      SAnalysisRecord analysis;
+      ResetAnalysisRecord(analysis, "WEEKEND");
+      SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
+      analysis.values[AC_REASON] = "Force close started";
+      WriteAnalysisRecord(analysis);
+   }
+
+   ulong targetTickets[];
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(ticket))
+         continue;
+      if (PositionGetString(POSITION_SYMBOL) != _Symbol ||
+          (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      int count = ArraySize(targetTickets);
+      ArrayResize(targetTickets, count + 1);
+      targetTickets[count] = ticket;
+   }
+
+   g_weekendForceCloseLastAttempt = now;
+   for (int i = 0; i < ArraySize(targetTickets); i++)
+   {
+      ulong ticket = targetTickets[i];
+      if (PositionSelectByTicket(ticket) && EnableAnalysisCsv)
       {
-         SAnalysisRecord analysis;
-         ResetAnalysisRecord(analysis, "WEEKEND");
-         SetAnalysisContext(analysis, now, AnalysisCurrentTimeMsc());
-         analysis.values[AC_REASON] = "Force close started";
-         WriteAnalysisRecord(analysis);
+         MqlTick tick;
+         ZeroMemory(tick);
+         SymbolInfoTick(_Symbol, tick);
+         double spreadPts = (tick.ask - tick.bid) / _Point;
+         SAnalysisRecord closeAnalysis;
+         ResetAnalysisRecord(closeAnalysis, "WEEKEND");
+         SetAnalysisContext(closeAnalysis, now, tick.time_msc);
+         closeAnalysis.values[AC_REASON] = "Force close position";
+         closeAnalysis.values[AC_DIRECTION] = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL";
+         closeAnalysis.values[AC_TICKET] = AnalysisLong((long)ticket);
+         closeAnalysis.values[AC_POSITION] = AnalysisLong(PositionGetInteger(POSITION_IDENTIFIER));
+         closeAnalysis.values[AC_BID] = AnalysisNumber(tick.bid, _Digits);
+         closeAnalysis.values[AC_ASK] = AnalysisNumber(tick.ask, _Digits);
+         closeAnalysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
+         WriteAnalysisRecord(closeAnalysis);
       }
-      for (int i = PositionsTotal() - 1; i >= 0; i--)
-      {
-         ulong ticket = PositionGetTicket(i);
-         if (!PositionSelectByTicket(ticket))
-            continue;
-         if (PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-            continue;
-         if (EnableAnalysisCsv)
-         {
-            MqlTick tick;
-            ZeroMemory(tick);
-            SymbolInfoTick(_Symbol, tick);
-            double spreadPts = (tick.ask - tick.bid) / _Point;
-            SAnalysisRecord closeAnalysis;
-            ResetAnalysisRecord(closeAnalysis, "WEEKEND");
-            SetAnalysisContext(closeAnalysis, now, tick.time_msc);
-            closeAnalysis.values[AC_REASON] = "Force close position";
-            closeAnalysis.values[AC_DIRECTION] = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL";
-            closeAnalysis.values[AC_TICKET] = AnalysisLong((long)ticket);
-            closeAnalysis.values[AC_POSITION] = AnalysisLong(PositionGetInteger(POSITION_IDENTIFIER));
-            closeAnalysis.values[AC_BID] = AnalysisNumber(tick.bid, _Digits);
-            closeAnalysis.values[AC_ASK] = AnalysisNumber(tick.ask, _Digits);
-            closeAnalysis.values[AC_SPREAD_POINTS] = AnalysisNumber(spreadPts, 1);
-            WriteAnalysisRecord(closeAnalysis);
-         }
-         ClosePositionByTicket(ticket, "週末休場前の強制決済");
-      }
+      ClosePositionByTicket(ticket, "週末休場前の強制決済", true);
    }
 }
 
@@ -3112,10 +3149,14 @@ int OnInit()
    g_canCloseBuy = g_canCloseSell = false;
    g_entryThresholdCrossedBuy = g_entryThresholdCrossedSell = false;
    g_stochasticCloseBuy = g_stochasticCloseSell = false;
-   g_weekendEntryStopped = false;
    g_weekendForceCloseActive = false;
    g_weekendTargetValid = false;
    g_weekendScheduleInitialized = false;
+   g_weekendSessionEnd = 0;
+   g_weekendNextSessionStart = 0;
+   g_weekendEntryStopTime = 0;
+   g_weekendForceCloseTime = 0;
+   g_weekendForceCloseLastAttempt = 0;
 
    // M15 signal 初期化
    g_M15Signal.barTime = 0;
@@ -3520,7 +3561,7 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
 
    int suppressionReasons = 0;
    string suppressionDetails = "";
-   if (g_weekendEntryStopped)
+   if (g_weekendForceCloseActive)
    {
       suppressionReasons |= ENTRY_SUPPRESS_WEEKEND;
       if (EnableAnalysisCsv)
@@ -3715,12 +3756,6 @@ void OnTick()
    {
       PrintFormat("価格データが無効のため処理を中断します。ASK=%.5f BID=%.5f スプレッド=%.1fポイント",
                   ASK, BID, spreadPts);
-      FlushPendingAtr2Records();
-      return;
-   }
-
-   if (g_weekendForceCloseActive)
-   {
       FlushPendingAtr2Records();
       return;
    }
