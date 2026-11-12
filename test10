@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
-#property version   "3.45"
+#property version   "4.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -319,16 +319,134 @@ struct SPendingTradeEvent
    ulong deal;
    ulong order;
    ulong position;
+   bool detailedWritten;
+   bool lightWritten;
 };
 SPendingTradeEvent g_pendingTradeEvents[];
 ulong g_processedTradeDeals[];
 long g_analysisWriteSuccessCount = 0;
 long g_analysisWriteFailureCount = 0;
+
+const int LIGHT_ANALYSIS_FIELD_COUNT = 43;
+enum LightAnalysisField
+{
+   LAF_RECORD_TYPE,
+   LAF_DATE_TIME,
+   LAF_TIME_MSC,
+   LAF_SYMBOL,
+   LAF_DIRECTION,
+   LAF_POSITION,
+   LAF_DEAL,
+   LAF_LOT,
+   LAF_PRICE,
+   LAF_SPREAD_POINTS,
+   LAF_SL,
+   LAF_TP,
+   LAF_ENTRY_SIGNAL,
+   LAF_H1_BAR_TIME,
+   LAF_H1_TREND_TYPE,
+   LAF_H1_TREND_STATE,
+   LAF_H1_DI_DIRECTION,
+   LAF_H1_EMA_DIRECTION,
+   LAF_ADX,
+   LAF_DI_PLUS,
+   LAF_DI_MINUS,
+   LAF_M15_BAR_TIME,
+   LAF_M15_RSI,
+   LAF_M15_MACD_MAIN,
+   LAF_M15_MACD_SIGNAL,
+   LAF_M15_MACD_CROSS,
+   LAF_M1_BAR_TIME,
+   LAF_M1_BB_UPPER,
+   LAF_M1_BB_MIDDLE,
+   LAF_M1_BB_LOWER,
+   LAF_M1_STOCH_K,
+   LAF_M1_STOCH_D,
+   LAF_M1_ATR,
+   LAF_M1_SUPER_TREND,
+   LAF_M1_SUPER_TREND_DIRECTION,
+   LAF_DEAL_REASON,
+   LAF_EXIT_SIGNAL_REASON,
+   LAF_ELAPSED_SECONDS,
+   LAF_DEAL_PROFIT,
+   LAF_DEAL_COMMISSION,
+   LAF_DEAL_SWAP,
+   LAF_DEAL_FEE,
+   LAF_REASON
+};
+
+struct SLightAnalysisRecord
+{
+   string values[LIGHT_ANALYSIS_FIELD_COUNT];
+};
+
+struct SLightEntrySnapshot
+{
+   ulong orderId;
+   ulong dealId;
+   string direction;
+   double spreadPoints;
+   double sl;
+   double tp;
+   string entrySignal;
+   datetime h1BarTime;
+   string h1TrendType;
+   string h1TrendState;
+   string h1DiDirection;
+   string h1EmaDirection;
+   string adx;
+   string diPlus;
+   string diMinus;
+   datetime m15BarTime;
+   string m15Rsi;
+   string m15MacdMain;
+   string m15MacdSignal;
+   string m15MacdCross;
+   datetime m1BarTime;
+   string m1BbUpper;
+   string m1BbMiddle;
+   string m1BbLower;
+   string m1StochK;
+   string m1StochD;
+   string m1Atr;
+   string m1SuperTrend;
+   string m1SuperTrendDirection;
+   bool valid;
+};
+
+struct SLightExitSnapshot
+{
+   ulong orderId;
+   ulong dealId;
+   ulong positionId;
+   string exitSignalReason;
+   datetime m1BarTime;
+   string m1StochK;
+   string m1StochD;
+   string h1TrendType;
+   bool valid;
+};
+
+SLightEntrySnapshot g_lightEntrySnapshots[];
+SLightExitSnapshot g_lightExitSnapshots[];
+int g_lightAnalysisFile = INVALID_HANDLE;
+string g_lightAnalysisFileName = "";
+string g_lightInitializedAnalysisFiles[];
+long g_lightAnalysisWriteSuccessCount = 0;
+long g_lightAnalysisWriteFailureCount = 0;
+int g_lightEntrySuppressionMaskBuy = 0;
+int g_lightEntrySuppressionMaskSell = 0;
+int g_lightEntrySuppressionMaskCurrentBuy = 0;
+int g_lightEntrySuppressionMaskCurrentSell = 0;
+int g_lightEntrySuppressionMaskPreviousBuy = 0;
+int g_lightEntrySuppressionMaskPreviousSell = 0;
+
+int ProcessPendingTradeEvents();
+
 datetime g_entrySuppressionBarBuy = 0;
 datetime g_entrySuppressionBarSell = 0;
 int g_entrySuppressionMaskBuy = 0;
 int g_entrySuppressionMaskSell = 0;
-int ProcessPendingTradeEvents();
 
 bool g_weekendForceCloseActive = false;
 bool g_weekendTargetValid = false;
@@ -521,6 +639,13 @@ void ResetAnalysisRecord(SAnalysisRecord &record, const string recordType)
    record.values[AC_RECORD_TYPE] = recordType;
 }
 
+void ResetLightAnalysisRecord(SLightAnalysisRecord &record, const string recordType)
+{
+   for (int i = 0; i < LIGHT_ANALYSIS_FIELD_COUNT; i++)
+      record.values[i] = "";
+   record.values[LAF_RECORD_TYPE] = recordType;
+}
+
 string AnalysisNumber(double value, int digits)
 {
    if (!MathIsValidNumber(value) || value == EMPTY_VALUE)
@@ -587,6 +712,18 @@ string BuildAnalysisCsvLine(const string &values[])
    return line + "\r\n";
 }
 
+string BuildLightAnalysisCsvLine(const string &values[])
+{
+   string line = "";
+   for (int i = 0; i < ArraySize(values); i++)
+   {
+      if (i > 0)
+         line += ",";
+      line += EscapeAnalysisCsvField(values[i]);
+   }
+   return line + "\r\n";
+}
+
 void SetAnalysisContext(SAnalysisRecord &record, datetime dateTime, long timeMsc)
 {
    record.values[AC_DATE_TIME] = AnalysisDateTime(dateTime);
@@ -620,6 +757,581 @@ void SetAnalysisContext(SAnalysisRecord &record, datetime dateTime, long timeMsc
    record.values[AC_M1_SUPER_TREND] = AnalysisArrayValue(g_superTrend, 1, _Digits);
    if (ArraySize(g_superTrendDir) > 1)
       record.values[AC_M1_SUPER_TREND_DIRECTION] = LogSuperTrendDirection(1);
+}
+
+string GenerateLightAnalysisCsvFileName(datetime weekStart)
+{
+   MqlDateTime dateTime;
+   if (g_analysisRunId == "" || weekStart <= 0 || !TimeToStruct(weekStart, dateTime))
+   return "";
+   return StringFormat("EA_Analysis_LIGHT_%s_SERVER%04d%02d%02d_%02d%02d%02d.csv",
+                    g_analysisRunId, dateTime.year, dateTime.mon, dateTime.day,
+                    dateTime.hour, dateTime.min, dateTime.sec);
+}
+
+bool IsLightAnalysisCsvInitialized(const string fileName)
+{
+   for (int i = 0; i < ArraySize(g_lightInitializedAnalysisFiles); i++)
+   if (g_lightInitializedAnalysisFiles[i] == fileName)
+      return true;
+   return false;
+}
+
+bool OpenLightAnalysisCsv(datetime recordTime)
+{
+   if (!EnableAnalysisCsv)
+   return true;
+
+   datetime weekStart = GetAnalysisWeekStart(recordTime);
+   if (weekStart <= 0)
+   return false;
+   string csvFileName = GenerateLightAnalysisCsvFileName(weekStart);
+   if (csvFileName == "")
+   return false;
+   if (g_lightAnalysisFile != INVALID_HANDLE && g_lightAnalysisFileName == csvFileName)
+   return true;
+   if (g_lightAnalysisFile != INVALID_HANDLE)
+   {
+   FileFlush(g_lightAnalysisFile);
+   FileClose(g_lightAnalysisFile);
+   g_lightAnalysisFile = INVALID_HANDLE;
+   g_lightAnalysisFileName = "";
+   }
+
+   bool initializedThisRun = IsLightAnalysisCsvInitialized(csvFileName);
+   if (initializedThisRun)
+   g_lightAnalysisFile = FileOpen(csvFileName, FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI, '\t', CP_UTF8);
+   else
+   {
+   if (FileIsExist(csvFileName) && !FileDelete(csvFileName))
+      return false;
+   g_lightAnalysisFile = FileOpen(csvFileName, FILE_WRITE | FILE_TXT | FILE_ANSI, '\t', CP_UTF8);
+   }
+   if (g_lightAnalysisFile == INVALID_HANDLE)
+   return false;
+   if (initializedThisRun)
+   {
+   if (!FileSeek(g_lightAnalysisFile, 0, SEEK_END))
+   {
+      FileClose(g_lightAnalysisFile);
+      g_lightAnalysisFile = INVALID_HANDLE;
+      return false;
+   }
+   }
+   else
+   {
+   static string lightHeaders[LIGHT_ANALYSIS_FIELD_COUNT];
+   if (ArraySize(lightHeaders) != LIGHT_ANALYSIS_FIELD_COUNT)
+   {
+      ArrayResize(lightHeaders, LIGHT_ANALYSIS_FIELD_COUNT);
+   }
+   lightHeaders[0] = "RecordType";
+   lightHeaders[1] = "DateTime";
+   lightHeaders[2] = "TimeMsc";
+   lightHeaders[3] = "Symbol";
+   lightHeaders[4] = "Direction";
+   lightHeaders[5] = "Position";
+   lightHeaders[6] = "Deal";
+   lightHeaders[7] = "Lot";
+   lightHeaders[8] = "Price";
+   lightHeaders[9] = "SpreadPoints";
+   lightHeaders[10] = "SL";
+   lightHeaders[11] = "TP";
+   lightHeaders[12] = "EntrySignal";
+   lightHeaders[13] = "H1BarTime";
+   lightHeaders[14] = "H1TrendType";
+   lightHeaders[15] = "H1TrendState";
+   lightHeaders[16] = "H1DIDirection";
+   lightHeaders[17] = "H1EMADirection";
+   lightHeaders[18] = "ADX";
+   lightHeaders[19] = "DIPlus";
+   lightHeaders[20] = "DIMinus";
+   lightHeaders[21] = "M15BarTime";
+   lightHeaders[22] = "M15RSI";
+   lightHeaders[23] = "M15MACDMain";
+   lightHeaders[24] = "M15MACDSignal";
+   lightHeaders[25] = "M15MACDCross";
+   lightHeaders[26] = "M1BarTime";
+   lightHeaders[27] = "M1BBUpper";
+   lightHeaders[28] = "M1BBMiddle";
+   lightHeaders[29] = "M1BBLower";
+   lightHeaders[30] = "M1StochK";
+   lightHeaders[31] = "M1StochD";
+   lightHeaders[32] = "M1ATR";
+   lightHeaders[33] = "M1SuperTrend";
+   lightHeaders[34] = "M1SuperTrendDirection";
+   lightHeaders[35] = "DealReason";
+   lightHeaders[36] = "ExitSignalReason";
+   lightHeaders[37] = "ElapsedSeconds";
+   lightHeaders[38] = "DealProfit";
+   lightHeaders[39] = "DealCommission";
+   lightHeaders[40] = "DealSwap";
+   lightHeaders[41] = "DealFee";
+   lightHeaders[42] = "Reason";
+   if (FileWriteString(g_lightAnalysisFile, BuildLightAnalysisCsvLine(lightHeaders)) == 0)
+   {
+      FileClose(g_lightAnalysisFile);
+      g_lightAnalysisFile = INVALID_HANDLE;
+      return false;
+   }
+   int initializedCount = ArraySize(g_lightInitializedAnalysisFiles);
+   if (ArrayResize(g_lightInitializedAnalysisFiles, initializedCount + 1) != initializedCount + 1)
+   {
+      FileClose(g_lightAnalysisFile);
+      g_lightAnalysisFile = INVALID_HANDLE;
+      return false;
+   }
+   g_lightInitializedAnalysisFiles[initializedCount] = csvFileName;
+   }
+   g_lightAnalysisFileName = csvFileName;
+   return true;
+}
+
+bool WriteLightAnalysisRecord(SLightAnalysisRecord &record)
+{
+   if (!EnableAnalysisCsv)
+   return true;
+
+   if (record.values[LAF_DATE_TIME] == "")
+   return false;
+   datetime recordTime = StringToTime(record.values[LAF_DATE_TIME]);
+   if (recordTime <= 0)
+   return false;
+   if (!OpenLightAnalysisCsv(recordTime))
+   {
+   g_lightAnalysisWriteFailureCount++;
+   return false;
+   }
+   if (FileWriteString(g_lightAnalysisFile, BuildLightAnalysisCsvLine(record.values)) == 0)
+   {
+   g_lightAnalysisWriteFailureCount++;
+   return false;
+   }
+   g_lightAnalysisWriteSuccessCount++;
+   return true;
+}
+
+void CloseLightAnalysisCsv()
+{
+   if (g_lightAnalysisFile != INVALID_HANDLE)
+   {
+   FileFlush(g_lightAnalysisFile);
+   FileClose(g_lightAnalysisFile);
+   g_lightAnalysisFile = INVALID_HANDLE;
+   g_lightAnalysisFileName = "";
+   }
+}
+
+string LightReasonMaskToText(int reasonMask)
+{
+   string codes = "";
+   if ((reasonMask & ENTRY_SUPPRESS_WEEKEND) != 0)
+   codes += (codes == "" ? "WEEKEND" : ";WEEKEND");
+   if ((reasonMask & ENTRY_SUPPRESS_INDICATOR) != 0)
+   codes += (codes == "" ? "INDICATOR" : ";INDICATOR");
+   if ((reasonMask & ENTRY_SUPPRESS_TREND_SETTING) != 0)
+   codes += (codes == "" ? "TREND_SETTING" : ";TREND_SETTING");
+   if ((reasonMask & ENTRY_SUPPRESS_RANGE_SETTING) != 0)
+   codes += (codes == "" ? "RANGE_SETTING" : ";RANGE_SETTING");
+   if ((reasonMask & ENTRY_SUPPRESS_H1_DIRECTION) != 0)
+   codes += (codes == "" ? "H1_DIRECTION" : ";H1_DIRECTION");
+   if ((reasonMask & ENTRY_SUPPRESS_SAME_M1_CLOSE) != 0)
+   codes += (codes == "" ? "SAME_M1_CLOSE" : ";SAME_M1_CLOSE");
+   if ((reasonMask & ENTRY_SUPPRESS_CLOSE_SIGNAL) != 0)
+   codes += (codes == "" ? "CLOSE_SIGNAL" : ";CLOSE_SIGNAL");
+   if ((reasonMask & ENTRY_SUPPRESS_SPREAD) != 0)
+   codes += (codes == "" ? "SPREAD" : ";SPREAD");
+   if ((reasonMask & ENTRY_SUPPRESS_POSITION_CAP) != 0)
+   codes += (codes == "" ? "POSITION_CAP" : ";POSITION_CAP");
+   if ((reasonMask & ENTRY_SUPPRESS_M15_PYRAMID) != 0)
+   codes += (codes == "" ? "M15_PYRAMID" : ";M15_PYRAMID");
+   if ((reasonMask & ENTRY_SUPPRESS_OTHER) != 0)
+   codes += (codes == "" ? "OTHER" : ";OTHER");
+   if ((reasonMask & ENTRY_SUPPRESS_SEND_FAILURE) != 0)
+   codes += (codes == "" ? "SEND_FAILURE" : ";SEND_FAILURE");
+   return codes;
+}
+
+void ResetLightEntrySuppressionState()
+{
+   g_lightEntrySuppressionMaskCurrentBuy = 0;
+   g_lightEntrySuppressionMaskCurrentSell = 0;
+}
+
+void FinalizeLightEntrySuppressionState(datetime now)
+{
+   if (!EnableAnalysisCsv)
+   return;
+   long nowMsc = AnalysisCurrentTimeMsc();
+   int buyNew = g_lightEntrySuppressionMaskCurrentBuy & ~g_lightEntrySuppressionMaskPreviousBuy;
+   int sellNew = g_lightEntrySuppressionMaskCurrentSell & ~g_lightEntrySuppressionMaskPreviousSell;
+   if (buyNew != 0)
+   {
+   SLightAnalysisRecord rec;
+   ResetLightAnalysisRecord(rec, "ENTRY_SUPPRESSION");
+   rec.values[LAF_DATE_TIME] = AnalysisDateTime(now);
+   rec.values[LAF_TIME_MSC] = AnalysisLong(nowMsc);
+   rec.values[LAF_SYMBOL] = _Symbol;
+   rec.values[LAF_DIRECTION] = "BUY";
+   rec.values[LAF_REASON] = LightReasonMaskToText(buyNew);
+   WriteLightAnalysisRecord(rec);
+   }
+   if (sellNew != 0)
+   {
+   SLightAnalysisRecord rec;
+   ResetLightAnalysisRecord(rec, "ENTRY_SUPPRESSION");
+   rec.values[LAF_DATE_TIME] = AnalysisDateTime(now);
+   rec.values[LAF_TIME_MSC] = AnalysisLong(nowMsc);
+   rec.values[LAF_SYMBOL] = _Symbol;
+   rec.values[LAF_DIRECTION] = "SELL";
+   rec.values[LAF_REASON] = LightReasonMaskToText(sellNew);
+   WriteLightAnalysisRecord(rec);
+   }
+   g_lightEntrySuppressionMaskPreviousBuy = g_lightEntrySuppressionMaskCurrentBuy;
+   g_lightEntrySuppressionMaskPreviousSell = g_lightEntrySuppressionMaskCurrentSell;
+}
+
+void RegisterLightEntrySuppression(bool isBuy, int reasonMask)
+{
+   if (!EnableAnalysisCsv || reasonMask == 0)
+   return;
+   if (isBuy)
+   g_lightEntrySuppressionMaskCurrentBuy |= reasonMask;
+   else
+   g_lightEntrySuppressionMaskCurrentSell |= reasonMask;
+}
+
+void RegisterLightEntrySnapshot(ulong orderId, ulong dealId, bool isBuy, double spreadPoints,
+                             double sl, double tp, const string entrySignal,
+                             datetime h1BarTime, TrendType h1Type, TrendState h1State,
+                             int h1DiDir, int h1EmaDir, double adx, double diPlus, double diMinus,
+                             datetime m15BarTime, double m15Rsi, double m15MacdMain,
+                             double m15MacdSignal, int macdCrossDir, datetime m1BarTime,
+                             double m1BbUpper, double m1BbMiddle, double m1BbLower,
+                             double m1StochK, double m1StochD, double m1Atr,
+                             double m1SuperTrend, int m1SuperTrendDir)
+{
+   int size = ArraySize(g_lightEntrySnapshots);
+   if (ArrayResize(g_lightEntrySnapshots, size + 1) != size + 1)
+   return;
+   g_lightEntrySnapshots[size].valid = true;
+   g_lightEntrySnapshots[size].orderId = orderId;
+   g_lightEntrySnapshots[size].dealId = dealId;
+   g_lightEntrySnapshots[size].direction = isBuy ? "BUY" : "SELL";
+   g_lightEntrySnapshots[size].spreadPoints = spreadPoints;
+   g_lightEntrySnapshots[size].sl = sl;
+   g_lightEntrySnapshots[size].tp = tp;
+   g_lightEntrySnapshots[size].entrySignal = entrySignal;
+   g_lightEntrySnapshots[size].h1BarTime = h1BarTime;
+   g_lightEntrySnapshots[size].h1TrendType = TrendTypeToString(h1Type);
+   g_lightEntrySnapshots[size].h1TrendState = TrendStateToString(h1State);
+   g_lightEntrySnapshots[size].h1DiDirection = AnalysisDirection(h1DiDir);
+   g_lightEntrySnapshots[size].h1EmaDirection = AnalysisDirection(h1EmaDir);
+   g_lightEntrySnapshots[size].adx = AnalysisNumber(adx, 5);
+   g_lightEntrySnapshots[size].diPlus = AnalysisNumber(diPlus, 5);
+   g_lightEntrySnapshots[size].diMinus = AnalysisNumber(diMinus, 5);
+   g_lightEntrySnapshots[size].m15BarTime = m15BarTime;
+   g_lightEntrySnapshots[size].m15Rsi = AnalysisNumber(m15Rsi, 3);
+   g_lightEntrySnapshots[size].m15MacdMain = AnalysisNumber(m15MacdMain, 5);
+   g_lightEntrySnapshots[size].m15MacdSignal = AnalysisNumber(m15MacdSignal, 5);
+   g_lightEntrySnapshots[size].m15MacdCross = AnalysisDirection(macdCrossDir);
+   g_lightEntrySnapshots[size].m1BarTime = m1BarTime;
+   g_lightEntrySnapshots[size].m1BbUpper = AnalysisNumber(m1BbUpper, _Digits);
+   g_lightEntrySnapshots[size].m1BbMiddle = AnalysisNumber(m1BbMiddle, _Digits);
+   g_lightEntrySnapshots[size].m1BbLower = AnalysisNumber(m1BbLower, _Digits);
+   g_lightEntrySnapshots[size].m1StochK = AnalysisNumber(m1StochK, 3);
+   g_lightEntrySnapshots[size].m1StochD = AnalysisNumber(m1StochD, 3);
+   g_lightEntrySnapshots[size].m1Atr = AnalysisNumber(m1Atr, _Digits);
+   g_lightEntrySnapshots[size].m1SuperTrend = AnalysisNumber(m1SuperTrend, _Digits);
+   g_lightEntrySnapshots[size].m1SuperTrendDirection = AnalysisDirection(m1SuperTrendDir);
+}
+
+bool FindLightEntrySnapshotByOrder(ulong orderId, SLightEntrySnapshot &snapshot)
+{
+   for (int i = 0; i < ArraySize(g_lightEntrySnapshots); i++)
+   {
+   if (g_lightEntrySnapshots[i].valid && g_lightEntrySnapshots[i].orderId == orderId)
+   {
+      snapshot = g_lightEntrySnapshots[i];
+      return true;
+   }
+   }
+   return false;
+}
+
+bool FindLightEntrySnapshotByDeal(ulong dealId, SLightEntrySnapshot &snapshot)
+{
+   for (int i = 0; i < ArraySize(g_lightEntrySnapshots); i++)
+   {
+   if (g_lightEntrySnapshots[i].valid && g_lightEntrySnapshots[i].dealId == dealId)
+   {
+      snapshot = g_lightEntrySnapshots[i];
+      return true;
+   }
+   }
+   return false;
+}
+
+void RemoveLightEntrySnapshotByOrder(ulong orderId)
+{
+   for (int i = 0; i < ArraySize(g_lightEntrySnapshots); i++)
+   {
+   if (g_lightEntrySnapshots[i].valid && g_lightEntrySnapshots[i].orderId == orderId)
+   {
+      g_lightEntrySnapshots[i].valid = false;
+      return;
+   }
+   }
+}
+
+void RegisterLightExitSnapshot(ulong orderId, ulong dealId, ulong positionId,
+                           const string exitSignalReason, datetime m1BarTime,
+                           double m1StochK, double m1StochD, TrendType h1Type)
+{
+   int size = ArraySize(g_lightExitSnapshots);
+   if (ArrayResize(g_lightExitSnapshots, size + 1) != size + 1)
+   return;
+   g_lightExitSnapshots[size].valid = true;
+   g_lightExitSnapshots[size].orderId = orderId;
+   g_lightExitSnapshots[size].dealId = dealId;
+   g_lightExitSnapshots[size].positionId = positionId;
+   g_lightExitSnapshots[size].exitSignalReason = exitSignalReason;
+   g_lightExitSnapshots[size].m1BarTime = m1BarTime;
+   g_lightExitSnapshots[size].m1StochK = AnalysisNumber(m1StochK, 3);
+   g_lightExitSnapshots[size].m1StochD = AnalysisNumber(m1StochD, 3);
+   g_lightExitSnapshots[size].h1TrendType = TrendTypeToString(h1Type);
+}
+
+bool FindLightExitSnapshotByOrder(ulong orderId, SLightExitSnapshot &snapshot)
+{
+   for (int i = 0; i < ArraySize(g_lightExitSnapshots); i++)
+   {
+   if (g_lightExitSnapshots[i].valid && g_lightExitSnapshots[i].orderId == orderId)
+   {
+      snapshot = g_lightExitSnapshots[i];
+      return true;
+   }
+   }
+   return false;
+}
+
+bool FindLightExitSnapshotByDeal(ulong dealId, SLightExitSnapshot &snapshot)
+{
+   for (int i = 0; i < ArraySize(g_lightExitSnapshots); i++)
+   {
+   if (g_lightExitSnapshots[i].valid && g_lightExitSnapshots[i].dealId == dealId)
+   {
+      snapshot = g_lightExitSnapshots[i];
+      return true;
+   }
+   }
+   return false;
+}
+
+void RemoveLightExitSnapshotByOrder(ulong orderId)
+{
+   for (int i = 0; i < ArraySize(g_lightExitSnapshots); i++)
+   {
+   if (g_lightExitSnapshots[i].valid && g_lightExitSnapshots[i].orderId == orderId)
+   {
+      g_lightExitSnapshots[i].valid = false;
+      return;
+   }
+   }
+}
+
+bool WriteLightEntryRecordFromDeal(ulong dealId, ulong orderId, ulong positionId, datetime dealTime,
+                               long dealTimeMsc, double price, double volume, const string direction,
+                               const string dealReason)
+{
+   SLightEntrySnapshot snap;
+   bool found = false;
+   if (orderId > 0)
+   found = FindLightEntrySnapshotByOrder(orderId, snap);
+   if (!found && dealId > 0)
+   found = FindLightEntrySnapshotByDeal(dealId, snap);
+
+   SLightAnalysisRecord rec;
+   ResetLightAnalysisRecord(rec, "ENTRY");
+   rec.values[LAF_DATE_TIME] = AnalysisDateTime(dealTime);
+   rec.values[LAF_TIME_MSC] = AnalysisLong(dealTimeMsc);
+   rec.values[LAF_SYMBOL] = _Symbol;
+   rec.values[LAF_DIRECTION] = direction;
+   rec.values[LAF_POSITION] = AnalysisLong((long)positionId);
+   rec.values[LAF_DEAL] = AnalysisLong((long)dealId);
+   rec.values[LAF_LOT] = AnalysisNumber(volume, 2);
+   rec.values[LAF_PRICE] = AnalysisNumber(price, _Digits);
+   if (found)
+   {
+   rec.values[LAF_SPREAD_POINTS] = AnalysisNumber(snap.spreadPoints, 1);
+   rec.values[LAF_SL] = AnalysisNumber(snap.sl, _Digits);
+   rec.values[LAF_TP] = AnalysisNumber(snap.tp, _Digits);
+   rec.values[LAF_ENTRY_SIGNAL] = snap.entrySignal;
+   rec.values[LAF_H1_BAR_TIME] = AnalysisDateTime(snap.h1BarTime);
+   rec.values[LAF_H1_TREND_TYPE] = snap.h1TrendType;
+   rec.values[LAF_H1_TREND_STATE] = snap.h1TrendState;
+   rec.values[LAF_H1_DI_DIRECTION] = snap.h1DiDirection;
+   rec.values[LAF_H1_EMA_DIRECTION] = snap.h1EmaDirection;
+   rec.values[LAF_ADX] = snap.adx;
+   rec.values[LAF_DI_PLUS] = snap.diPlus;
+   rec.values[LAF_DI_MINUS] = snap.diMinus;
+   rec.values[LAF_M15_BAR_TIME] = AnalysisDateTime(snap.m15BarTime);
+   rec.values[LAF_M15_RSI] = snap.m15Rsi;
+   rec.values[LAF_M15_MACD_MAIN] = snap.m15MacdMain;
+   rec.values[LAF_M15_MACD_SIGNAL] = snap.m15MacdSignal;
+   rec.values[LAF_M15_MACD_CROSS] = snap.m15MacdCross;
+   rec.values[LAF_M1_BAR_TIME] = AnalysisDateTime(snap.m1BarTime);
+   rec.values[LAF_M1_BB_UPPER] = snap.m1BbUpper;
+   rec.values[LAF_M1_BB_MIDDLE] = snap.m1BbMiddle;
+   rec.values[LAF_M1_BB_LOWER] = snap.m1BbLower;
+   rec.values[LAF_M1_STOCH_K] = snap.m1StochK;
+   rec.values[LAF_M1_STOCH_D] = snap.m1StochD;
+   rec.values[LAF_M1_ATR] = snap.m1Atr;
+   rec.values[LAF_M1_SUPER_TREND] = snap.m1SuperTrend;
+   rec.values[LAF_M1_SUPER_TREND_DIRECTION] = snap.m1SuperTrendDirection;
+   }
+   rec.values[LAF_REASON] = dealReason;
+   bool ok = WriteLightAnalysisRecord(rec);
+   if (orderId > 0)
+   RemoveLightEntrySnapshotByOrder(orderId);
+   return ok;
+}
+
+bool WriteLightExitRecordFromDeal(ulong dealId, ulong orderId, ulong positionId, datetime dealTime,
+                              long dealTimeMsc, double price, double volume, const string direction,
+                              long dealReason, double dealProfit, double dealCommission,
+                              double dealSwap, double dealFee, const string exitSignalReason,
+                              datetime entryTime, long entryTimeMsc)
+{
+   SLightExitSnapshot snap;
+   bool found = false;
+   if (orderId > 0)
+   found = FindLightExitSnapshotByOrder(orderId, snap);
+   if (!found && dealId > 0)
+   found = FindLightExitSnapshotByDeal(dealId, snap);
+
+   SLightAnalysisRecord rec;
+   ResetLightAnalysisRecord(rec, "EXIT");
+   rec.values[LAF_DATE_TIME] = AnalysisDateTime(dealTime);
+   rec.values[LAF_TIME_MSC] = AnalysisLong(dealTimeMsc);
+   rec.values[LAF_SYMBOL] = _Symbol;
+   rec.values[LAF_DIRECTION] = direction;
+   rec.values[LAF_POSITION] = AnalysisLong((long)positionId);
+   rec.values[LAF_DEAL] = AnalysisLong((long)dealId);
+   rec.values[LAF_LOT] = AnalysisNumber(volume, 2);
+   rec.values[LAF_PRICE] = AnalysisNumber(price, _Digits);
+   rec.values[LAF_DEAL_REASON] = EnumToString((ENUM_DEAL_REASON)dealReason);
+   rec.values[LAF_EXIT_SIGNAL_REASON] = exitSignalReason;
+   rec.values[LAF_DEAL_PROFIT] = AnalysisNumber(dealProfit, 2);
+   rec.values[LAF_DEAL_COMMISSION] = AnalysisNumber(dealCommission, 2);
+   rec.values[LAF_DEAL_SWAP] = AnalysisNumber(dealSwap, 2);
+   rec.values[LAF_DEAL_FEE] = AnalysisNumber(dealFee, 2);
+   if (entryTime > 0 && entryTimeMsc > 0)
+   rec.values[LAF_ELAPSED_SECONDS] = AnalysisNumber((double)((dealTimeMsc - entryTimeMsc) / 1000L), 1);
+   if (found)
+   {
+   rec.values[LAF_M1_BAR_TIME] = AnalysisDateTime(snap.m1BarTime);
+   rec.values[LAF_M1_STOCH_K] = snap.m1StochK;
+   rec.values[LAF_M1_STOCH_D] = snap.m1StochD;
+   rec.values[LAF_H1_TREND_TYPE] = snap.h1TrendType;
+   rec.values[LAF_EXIT_SIGNAL_REASON] = snap.exitSignalReason;
+   }
+   rec.values[LAF_REASON] = exitSignalReason;
+   bool ok = WriteLightAnalysisRecord(rec);
+   if (orderId > 0)
+   RemoveLightExitSnapshotByOrder(orderId);
+   return ok;
+}
+
+bool WriteLightEntrySuppressionRecord(bool isBuy, int reasonMask)
+{
+   if (reasonMask == 0)
+   return true;
+   SLightAnalysisRecord rec;
+   ResetLightAnalysisRecord(rec, "ENTRY_SUPPRESSION");
+   rec.values[LAF_DATE_TIME] = AnalysisDateTime(TimeCurrent());
+   rec.values[LAF_TIME_MSC] = AnalysisLong(AnalysisCurrentTimeMsc());
+   rec.values[LAF_SYMBOL] = _Symbol;
+   rec.values[LAF_DIRECTION] = isBuy ? "BUY" : "SELL";
+   rec.values[LAF_REASON] = LightReasonMaskToText(reasonMask);
+   return WriteLightAnalysisRecord(rec);
+}
+
+void CaptureEntryLightSnapshot(ulong orderId, ulong dealId, bool isBuy, double spreadPoints, double sl, double tp,
+                            const string entrySignal)
+{
+   if (!EnableAnalysisCsv)
+   return;
+   RegisterLightEntrySnapshot(orderId, dealId, isBuy, spreadPoints, sl, tp, entrySignal,
+                           iTime(_Symbol, PERIOD_H1, 1), g_TrendTypeH, g_TrendStateH,
+                           g_H1DiDir, g_H1EmaDir,
+                           (g_h1_adxArr[1] > 0.0 && IsIndicatorValueValid(g_h1_adxArr[1])) ? g_h1_adxArr[1] : 0.0,
+                           (g_h1_dipArr[1] > 0.0 && IsIndicatorValueValid(g_h1_dipArr[1])) ? g_h1_dipArr[1] : 0.0,
+                           (g_h1_dimArr[1] > 0.0 && IsIndicatorValueValid(g_h1_dimArr[1])) ? g_h1_dimArr[1] : 0.0,
+                           iTime(_Symbol, PERIOD_M15, 1),
+                           (ArraySize(g_m15_rsiArr) > 1 && IsIndicatorValueValid(g_m15_rsiArr[1])) ? g_m15_rsiArr[1] : 0.0,
+                           (ArraySize(g_m15_macdMainAll) > 1 && IsIndicatorValueValid(g_m15_macdMainAll[1])) ? g_m15_macdMainAll[1] : 0.0,
+                           (ArraySize(g_m15_macdSigAll) > 1 && IsIndicatorValueValid(g_m15_macdSigAll[1])) ? g_m15_macdSigAll[1] : 0.0,
+                           g_M15Signal.hasMACDCross ? g_M15Signal.macdCrossDir : 0,
+                           iTime(_Symbol, PERIOD_M1, 1),
+                           (ArraySize(g_bbUpper) > 1 && IsIndicatorValueValid(g_bbUpper[1])) ? g_bbUpper[1] : 0.0,
+                           (ArraySize(g_bbMiddle) > 1 && IsIndicatorValueValid(g_bbMiddle[1])) ? g_bbMiddle[1] : 0.0,
+                           (ArraySize(g_bbLower) > 1 && IsIndicatorValueValid(g_bbLower[1])) ? g_bbLower[1] : 0.0,
+                           (ArraySize(g_stochK) > 1 && IsIndicatorValueValid(g_stochK[1])) ? g_stochK[1] : 0.0,
+                           (ArraySize(g_stochD) > 1 && IsIndicatorValueValid(g_stochD[1])) ? g_stochD[1] : 0.0,
+                           (ArraySize(g_atr) > 1 && IsIndicatorValueValid(g_atr[1])) ? g_atr[1] : 0.0,
+                           (ArraySize(g_superTrend) > 1 && IsIndicatorValueValid(g_superTrend[1])) ? g_superTrend[1] : 0.0,
+                           (ArraySize(g_superTrendDir) > 1) ? g_superTrendDir[1] : 0);
+}
+
+void CaptureExitLightSnapshot(ulong orderId, ulong dealId, ulong positionId, const string reason,
+                           datetime m1BarTime, double m1StochK, double m1StochD)
+{
+   if (!EnableAnalysisCsv)
+   return;
+   RegisterLightExitSnapshot(orderId, dealId, positionId, reason, m1BarTime, m1StochK, m1StochD, g_TrendTypeH);
+}
+
+void InitializeLightAnalysisState()
+{
+   g_lightAnalysisFile = INVALID_HANDLE;
+   g_lightAnalysisFileName = "";
+   ArrayResize(g_lightInitializedAnalysisFiles, 0);
+   ArrayResize(g_lightEntrySnapshots, 0);
+   ArrayResize(g_lightExitSnapshots, 0);
+   g_lightAnalysisWriteSuccessCount = 0;
+   g_lightAnalysisWriteFailureCount = 0;
+   g_lightEntrySuppressionMaskBuy = 0;
+   g_lightEntrySuppressionMaskSell = 0;
+   g_lightEntrySuppressionMaskCurrentBuy = 0;
+   g_lightEntrySuppressionMaskCurrentSell = 0;
+   g_lightEntrySuppressionMaskPreviousBuy = 0;
+   g_lightEntrySuppressionMaskPreviousSell = 0;
+}
+
+bool IsLightEntrySnapshotNeeded(const string recordType)
+{
+   return recordType == "ENTRY" || recordType == "EXIT";
+}
+
+bool ProcessLightTradeEvent(SPendingTradeEvent &event)
+{
+   if (!EnableAnalysisCsv)
+   return true;
+   if (!event.lightWritten && event.deal > 0)
+   {
+   if (IsTradeDealProcessed(event.deal))
+   {
+      event.lightWritten = true;
+      return true;
+   }
+   }
+   return false;
+}
+
+bool IsLightEntryTradeEvent(ulong deal)
+{
+   return deal > 0;
 }
 
 bool InitializeAnalysisCsvRunId()
@@ -2236,14 +2948,14 @@ public:
       {
          g_entryPriceBuy = g_bbLower[1];
          g_entryPriceSell = g_bbUpper[1];
+         // レンジ反転エントリーは、価格が下限/上限を抜けた後に戻ってくる場面で成立する。
+         // そのため、BUYは下限以下/到達、SELLは上限以上/到達を条件にする。
          g_entryBuyOnOrBelow = true;
          g_entrySellOnOrAbove = true;
          if (iClose(_Symbol, PERIOD_M1, 1) <= g_bbLower[1])
             g_entryThresholdCrossedBuy = true;
          if (iClose(_Symbol, PERIOD_M1, 1) >= g_bbUpper[1])
             g_entryThresholdCrossedSell = true;
-         g_entryBuyOnOrBelow = false;
-         g_entrySellOnOrAbove = false;
       }
       else if (h1Type == TREND_UNKNOWN || h1Type == TREND_DIRECTION_UNKNOWN)
       {
@@ -2397,6 +3109,7 @@ void LogEntrySuppression(bool isBuy, double entryPrice, const string signal, int
       g_entrySuppressionBarSell = signalBar;
       g_entrySuppressionMaskSell = loggedMask;
    }
+   RegisterLightEntrySuppression(isBuy, newReasons);
 
    SAnalysisRecord analysis;
    ResetAnalysisRecord(analysis, "ENTRY_SUPPRESSION");
@@ -2512,6 +3225,8 @@ bool SendMarketOrder(ENUM_ORDER_TYPE type, double volume, double sl, double tp, 
       if (positionId > 0)
          analysis.values[AC_POSITION] = AnalysisLong(positionId);
       WriteAnalysisRecord(analysis);
+      CaptureEntryLightSnapshot(res.order, res.deal, isBuy, spreadPts, sl, tp,
+                               EnumToString(signal));
       FlushTradeTickHistoryToCsv("ORDER", (long)res.order);
       g_tradeTickWritePos = 0;
       g_tradeTickCount = 0;
@@ -2622,6 +3337,10 @@ bool ClosePositionByTicket(ulong ticket, const string reason, bool weekendForceC
       analysis.values[AC_DEAL] = AnalysisLong((long)res.deal);
       analysis.values[AC_ORDER] = AnalysisLong((long)res.order);
       WriteAnalysisRecord(analysis);
+      CaptureExitLightSnapshot((ulong)res.order, (ulong)res.deal, (ulong)positionId,
+                              reason, iTime(_Symbol, PERIOD_M1, 1),
+                              (ArraySize(g_stochK) > 1 && IsIndicatorValueValid(g_stochK[1])) ? g_stochK[1] : 0.0,
+                              (ArraySize(g_stochD) > 1 && IsIndicatorValueValid(g_stochD[1])) ? g_stochD[1] : 0.0);
       FlushTradeTickHistoryToCsv("CLOSE", (long)ticket);
       g_tradeTickWritePos = 0;
       g_tradeTickCount = 0;
@@ -3038,6 +3757,7 @@ void ProcessWeekendSession(datetime now, bool refreshSchedule)
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   InitializeLightAnalysisState();
    bool runIdInitialized = InitializeAnalysisCsvRunId();
    if (!EnableAnalysisCsv)
    {
@@ -3177,6 +3897,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    ProcessPendingTradeEvents();
+   CloseLightAnalysisCsv();
    FlushPendingAtr2Records();
    if (EnableAnalysisCsv && ArraySize(g_pendingTradeEvents) > 0)
       PrintFormat("未処理の取引Dealイベントが終了時に残っています。件数=%d", ArraySize(g_pendingTradeEvents));
@@ -3537,9 +4258,9 @@ void EnterPosition(bool canEntry, ENUM_POSITION_TYPE posType, double entryPrice,
       double bbWidth = g_bbUpper[1] - g_bbLower[1];
       bool bbWidthOk = bbWidth >= SL_Points * 1.5 * _Point;
       bool rangeBuyOk = bbWidthOk && g_m15_rsiArr[1] <= rsiOversold &&
-                        g_entryThresholdCrossedBuy && ask >= entryPrice;
+                        g_entryThresholdCrossedBuy && ask <= entryPrice;
       bool rangeSellOk = bbWidthOk && g_m15_rsiArr[1] >= rsiOverbought &&
-                         g_entryThresholdCrossedSell && bid <= entryPrice;
+                         g_entryThresholdCrossedSell && bid >= entryPrice;
       if ((isBuy && !rangeBuyOk) || (!isBuy && !rangeSellOk))
          return;
    }
@@ -3823,6 +4544,7 @@ void OnTick()
          LogEntrySuppression(false, g_entryPriceSell, EnumToString(g_lastTrendEntrySignalSell),
                              ENTRY_SUPPRESS_SPREAD, "OnTick spread filter.",
                              ASK, BID);
+      FinalizeLightEntrySuppressionState(TimeCurrent());
       FlushPendingAtr2Records();
       return;
    }
@@ -3852,6 +4574,7 @@ void OnTick()
    {
       EnterPosition(g_canEntrySell, POSITION_TYPE_SELL, g_entryPriceSell, BID, ASK, BID);
    }
+   FinalizeLightEntrySuppressionState(TimeCurrent());
    FlushPendingAtr2Records();
 }
 
@@ -3986,6 +4709,8 @@ void QueueTradeEvent(ulong deal, ulong order, ulong position)
    g_pendingTradeEvents[size].deal = deal;
    g_pendingTradeEvents[size].order = order;
    g_pendingTradeEvents[size].position = position;
+   g_pendingTradeEvents[size].detailedWritten = false;
+   g_pendingTradeEvents[size].lightWritten = false;
 }
 
 void RemovePendingTradeEvent(int index)
@@ -3996,6 +4721,8 @@ void RemovePendingTradeEvent(int index)
       g_pendingTradeEvents[i].deal = g_pendingTradeEvents[i + 1].deal;
       g_pendingTradeEvents[i].order = g_pendingTradeEvents[i + 1].order;
       g_pendingTradeEvents[i].position = g_pendingTradeEvents[i + 1].position;
+      g_pendingTradeEvents[i].detailedWritten = g_pendingTradeEvents[i + 1].detailedWritten;
+      g_pendingTradeEvents[i].lightWritten = g_pendingTradeEvents[i + 1].lightWritten;
    }
    ArrayResize(g_pendingTradeEvents, size - 1);
 }
@@ -4117,11 +4844,39 @@ int ProcessPendingTradeEvents()
          index++;
          continue;
       }
-      if (!WriteAnalysisRecord(analysis))
+      bool detailedWritten = WriteAnalysisRecord(analysis);
+      if (!detailedWritten)
       {
          ArrayResize(g_processedTradeDeals, processedSize);
          index++;
          continue;
+      }
+      g_pendingTradeEvents[index].detailedWritten = true;
+
+      if (isEntry)
+      {
+         long lightPositionId = (long)positionId;
+         bool lightOk = WriteLightEntryRecordFromDeal(deal, order, positionId, dealTime, dealTimeMsc,
+                                                    price, volume,
+                                                    positionType == POSITION_TYPE_BUY ? "BUY" : "SELL",
+                                                    DealReasonToString(dealReason));
+         if (lightOk)
+            g_pendingTradeEvents[index].lightWritten = true;
+      }
+      else if (isExit)
+      {
+         bool lightOk = WriteLightExitRecordFromDeal(deal, order, positionId, dealTime, dealTimeMsc,
+                                                   price, volume,
+                                                   positionType == POSITION_TYPE_BUY ? "BUY" : "SELL",
+                                                   dealReason,
+                                                   HistoryDealGetDouble(deal, DEAL_PROFIT),
+                                                   HistoryDealGetDouble(deal, DEAL_COMMISSION),
+                                                   HistoryDealGetDouble(deal, DEAL_SWAP),
+                                                   HistoryDealGetDouble(deal, DEAL_FEE),
+                                                   DealReasonToString(dealReason),
+                                                   0, 0);
+         if (lightOk)
+            g_pendingTradeEvents[index].lightWritten = true;
       }
 
       g_processedTradeDeals[processedSize] = deal;
