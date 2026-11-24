@@ -16,6 +16,7 @@ CTrade trade;
 #define INDICATOR_BARS 25        // 指標・価格系列の共通取得本数
 #define MAX_HISTORY 100          // トレード履歴の最大記録数（100件）
 #define SUPERTREND_INIT_BARS 50  // SuperTrend初期化用のM1履歴本数
+#define LIGHT_ANALYSIS_FIELD_COUNT 24
 
 // CSVにエントリー抑制理由を記述するための処理。各値は2の累乗のビットマスクで、複数の抑制理由は | で組み合わせる。
 #define ENTRY_SUPPRESS_WEEKEND       1    // 週末による新規エントリー禁止
@@ -334,7 +335,6 @@ ulong g_processedTradeDeals[];
 long g_analysisWriteSuccessCount = 0;
 long g_analysisWriteFailureCount = 0;
 
-const int LIGHT_ANALYSIS_FIELD_COUNT = 24;
 enum LightAnalysisField
 {
    LAF_RECORD_TYPE,
